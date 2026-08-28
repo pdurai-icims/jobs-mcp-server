@@ -34,26 +34,53 @@ server.tool(
         const params = new URLSearchParams({ q: query, limit });
         if (location) params.append("location", location);
 
-        const res = await fetch(
-            `https://your-jobs-api.com/search?${params}`,
-            {
-                headers: {
-                    "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
-                    "Content-Type": "application/json"
-                }
-            }
-        );
+        // const res = await fetch(
+        //     `https://your-jobs-api.com/search?${params}`,
+        //     {
+        //         headers: {
+        //             "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
+        //             "Content-Type": "application/json"
+        //         }
+        //     }
+        // );
 
-        if (!res.ok) {
-            return {
-                content: [{
-                    type: "text",
-                    text: `Error fetching jobs: ${res.statusText}`
-                }]
-            };
-        }
+        // if (!res.ok) {
+        //     return {
+        //         content: [{
+        //             type: "text",
+        //             text: `Error fetching jobs: ${res.statusText}`
+        //         }]
+        //     };
+        // }
 
-        const data = await res.json();
+        const data = [
+	{
+		"title": "Senior React Native Developer",
+		"company": "ABC Technologies",
+		"location": "Hyderabad",
+		"skills": "React Native,TypeScript,AWS",
+		"experience": "5+ years",
+		"status": "Open"
+	},
+	{
+		"title": "AI Engineer",
+		"company": "XYZ Technologies",
+		"location": "Bengaluru",
+		"skills": "Python,LLM,RAG",
+		"experience": "3+ years",
+		"status": "Open"
+	},
+	{
+		"title": "Mobile Engineering Manager",
+		"company": "Test Company",
+		"location": "Remote",
+		"skills": "React Native,Leadership",
+		"experience": "8+ years",
+		"status": "Open"
+	}
+]
+
+        // const data = await res.json();
 
         // Return result to Claude — Claude will format it for the user
         return {
