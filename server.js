@@ -29,96 +29,77 @@ server.tool(
 
     // This function runs when Claude calls your tool
     async ({ query, location, limit = 5 }) => {
+        try {
+            // Fetch jobs from staging API
+            const params = new URLSearchParams({ offset: "1", limit: "100" });
 
-        // Fetch jobs from staging API
-        const params = new URLSearchParams({ offset: "1", limit: "100" });
-
-        const res = await fetch(
-            // `https://your-jobs-api.com/search?${params}`,
-            // `https://saalqngddakjvqnuldjf.supabase.co/rest/v1/jobs`,
-            `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
-            {
-                headers: {
-                    // "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
-                    "Content-Type": "application/json",
-                    // "apikey": "sb_publishable_Faugw9G95-KhZErI_7O0qA_6g_jVapr",
-                    // "Cookie": "__cf_bm=jKBIf4U1L3VqKq2JmCXjCuomv0.ikLQ9CwcTzboZKyg-1785390106.3807838-1.0.1.1-9rOK8esw8iUbVM3H6qFudC_2zezfaJHyFsodkU_GRJBt4zBb0jjz73AktNFTgcl2LbA7vkXO7A3NykKur0McXK7A2lEJ1nFpFeAuh7.fGL2zqk2jNxPzguiT9V7uHebd"
-                    "Accept": "application/json",
-                    "X-Jibe-Client": "mortonfinancial"
+            const res = await fetch(
+                // `https://your-jobs-api.com/search?${params}`,
+                // `https://saalqngddakjvqnuldjf.supabase.co/rest/v1/jobs`,
+                `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
+                {
+                    headers: {
+                        // "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
+                        "Content-Type": "application/json",
+                        // "apikey": "sb_publishable_Faugw9G95-KhZErI_7O0qA_6g_jVapr",
+                        // "Cookie": "__cf_bm=jKBIf4U1L3VqKq2JmCXjCuomv0.ikLQ9CwcTzboZKyg-1785390106.3807838-1.0.1.1-9rOK8esw8iUbVM3H6qFudC_2zezfaJHyFsodkU_GRJBt4zBb0jjz73AktNFTgcl2LbA7vkXO7A3NykKur0McXK7A2lEJ1nFpFeAuh7.fGL2zqk2jNxPzguiT9V7uHebd"
+                        "Accept": "application/json",
+                        "X-Jibe-Client": "mortonfinancial"
+                    }
                 }
-            }
-        );
+            );
 
-        if (!res.ok) {
+            if (!res.ok) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Error fetching jobs from API (Status ${res.status}): ${res.statusText}`
+                    }]
+                };
+            }
+
+            const data = await res.json();
+            let jobs = data.jobs || [];
+
+            // Filter by query keyword in title or description if provided
+            if (query) {
+                const q = query.toLowerCase();
+                jobs = jobs.filter(j =>
+                    (j.title && j.title.toLowerCase().includes(q)) ||
+                    (j.description && j.description.toLowerCase().includes(q)) ||
+                    (j.skills && j.skills.toLowerCase().includes(q))
+                );
+            }
+
+            // Filter by location if provided
+            if (location) {
+                const loc = location.toLowerCase();
+                jobs = jobs.filter(j =>
+                    (j.city && j.city.toLowerCase().includes(loc)) ||
+                    (j.state && j.state.toLowerCase().includes(loc)) ||
+                    (j.country && j.country.toLowerCase().includes(loc)) ||
+                    (j.location_type && j.location_type.toLowerCase().includes(loc))
+                );
+            }
+
+            // Slice to requested limit
+            const results = jobs.slice(0, limit);
+
+            // Return result to Claude — Claude will format it for the user
             return {
                 content: [{
                     type: "text",
-                    text: `Error fetching jobs: ${res.statusText}`
+                    text: JSON.stringify({ count: results.length, total_found: jobs.length, jobs: results }, null, 2)
+                }]
+            };
+        } catch (err) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Jobs API is currently unreachable or down. Details: ${err.message}${err.cause ? ` (${err.cause.message || err.cause})` : ""}`
                 }]
             };
         }
-
-//         const data = [
-// 	{
-// 		"title": "Senior React Native Developer",
-// 		"company": "ABC Technologies",
-// 		"location": "Hyderabad",
-// 		"skills": "React Native,TypeScript,AWS",
-// 		"experience": "5+ years",
-// 		"status": "Open"
-// 	},
-// 	{
-// 		"title": "AI Engineer",
-// 		"company": "XYZ Technologies",
-// 		"location": "Bengaluru",
-// 		"skills": "Python,LLM,RAG",
-// 		"experience": "3+ years",
-// 		"status": "Open"
-// 	},
-// 	{
-// 		"title": "Mobile Engineering Manager",
-// 		"company": "Test Company",
-// 		"location": "Remote",
-// 		"skills": "React Native,Leadership",
-// 		"experience": "8+ years",
-// 		"status": "Open"
-// 	}
-// ]
-
-        const data = await res.json();
-        let jobs = data.jobs || [];
-
-        // Filter by query keyword in title or description if provided
-        if (query) {
-            const q = query.toLowerCase();
-            jobs = jobs.filter(j =>
-                (j.title && j.title.toLowerCase().includes(q)) ||
-                (j.description && j.description.toLowerCase().includes(q)) ||
-                (j.skills && j.skills.toLowerCase().includes(q))
-            );
-        }
-
-        // Filter by location if provided
-        if (location) {
-            const loc = location.toLowerCase();
-            jobs = jobs.filter(j =>
-                (j.city && j.city.toLowerCase().includes(loc)) ||
-                (j.state && j.state.toLowerCase().includes(loc)) ||
-                (j.country && j.country.toLowerCase().includes(loc)) ||
-                (j.location_type && j.location_type.toLowerCase().includes(loc))
-            );
-        }
-
-        // Slice to requested limit
-        const results = jobs.slice(0, limit);
-
-        // Return result to Claude — Claude will format it for the user
-        return {
-            content: [{
-                type: "text",
-                text: JSON.stringify({ count: results.length, total_found: jobs.length, jobs: results }, null, 2)
-            }]
-        };
     }
 );
 
@@ -128,32 +109,41 @@ server.tool(
     "Get full details of a specific job listing by slug or req_id.",
     { job_id: z.string().describe("The job listing slug or req_id") },
     async ({ job_id }) => {
-        const res = await fetch(
-            `https://job-service-ipipeline.staging.icimsmco.net/jobs?offset=1&limit=100`,
-            {
-                headers: {
-                    "Accept": "application/json",
-                    "X-Jibe-Client": "mortonfinancial"
+        try {
+            const res = await fetch(
+                `https://job-service-ipipeline.staging.icimsmco.net/jobs?offset=1&limit=100`,
+                {
+                    headers: {
+                        "Accept": "application/json",
+                        "X-Jibe-Client": "mortonfinancial"
+                    }
                 }
+            );
+
+            if (!res.ok) {
+                return {
+                    content: [{ type: "text", text: `Error fetching job details: ${res.statusText}` }]
+                };
             }
-        );
 
-        if (!res.ok) {
+            const data = await res.json();
+            const job = (data.jobs || []).find(j => j.slug === job_id || j.req_id === job_id);
+
+            if (!job) {
+                return {
+                    content: [{ type: "text", text: `Job not found with ID/slug: ${job_id}` }]
+                };
+            }
+
+            return { content: [{ type: "text", text: JSON.stringify(job, null, 2) }] };
+        } catch (err) {
             return {
-                content: [{ type: "text", text: `Error fetching job details: ${res.statusText}` }]
+                content: [{
+                    type: "text",
+                    text: `Jobs API is currently unreachable or down. Details: ${err.message}${err.cause ? ` (${err.cause.message || err.cause})` : ""}`
+                }]
             };
         }
-
-        const data = await res.json();
-        const job = (data.jobs || []).find(j => j.slug === job_id || j.req_id === job_id);
-
-        if (!job) {
-            return {
-                content: [{ type: "text", text: `Job not found with ID/slug: ${job_id}` }]
-            };
-        }
-
-        return { content: [{ type: "text", text: JSON.stringify(job, null, 2) }] };
     }
 );
 
@@ -196,4 +186,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MCP server running on port ${PORT}`);
 });
- 
