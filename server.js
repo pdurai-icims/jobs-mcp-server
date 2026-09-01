@@ -30,14 +30,13 @@ server.tool(
     // This function runs when Claude calls your tool
     async ({ query, location, limit = 5 }) => {
 
-        // ── Call YOUR actual jobs API here ──
-        const params = new URLSearchParams({ q: query, limit });
-        if (location) params.append("location", location);
+        // Fetch jobs from staging API
+        const params = new URLSearchParams({ offset: "1", limit: "100" });
 
         const res = await fetch(
             // `https://your-jobs-api.com/search?${params}`,
             // `https://saalqngddakjvqnuldjf.supabase.co/rest/v1/jobs`,
-            'https://job-service-ipipeline.staging.icimsmco.net/jobs?offset=1&limit=80',
+            `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
             {
                 headers: {
                     // "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
@@ -87,12 +86,90 @@ server.tool(
 // ]
 
         const data = await res.json();
+        let jobs = data.jobs || [];
+
+        // Filter by query keyword in title or description if provided
+        if (query) {
+            const q = query.toLowerCase();
+            jobs = jobs.filter(j =>
+                (j.title && j.title.toLowerCase().includes(q)) ||
+                (j.description && j.description.toLowerCase().includes(q)) ||
+                (j.skills && j.skills.toLowerCase().includes(q))
+            );
+        }
+
+        // Filter by location if provided
+        if (location) {
+            const loc = location.toLowerCase();
+            jobs = jobs.filter(j =>
+                (j.city && j.city.toLowerCase().includes(loc)) ||
+                (j.state && j.state.toLowerCase().includes(loc)) ||
+                (j.country && j.country.toLowerCase().includes(loc)) ||
+                (j.location_type && j.location_type.toLowerCase().includes(loc))
+            );
+        }
+
+        // Slice to requested limit
+        const results = jobs.slice(0, limit);
 
         // Return result to Claude — Claude will format it for the user
         return {
             content: [{
                 type: "text",
-                text: JSON.stringify(data, null, 2)
+                text: JSON.stringify({ count: results.length, total_found: jobs.length, jobs: results }, null, 2)
+            }]
+        };
+    }
+);
+
+// ── Tool 2: Get job details ──
+server.tool(
+    "get_job_details",
+    "Get full details of a specific job listing by slug or req_id.",
+    { job_id: z.string().describe("The job listing slug or req_id") },
+    async ({ job_id }) => {
+        const res = await fetch(
+            `https://job-service-ipipeline.staging.icimsmco.net/jobs?offset=1&limit=100`,
+            {
+                headers: {
+                    "Accept": "application/json",
+                    "X-Jibe-Client": "mortonfinancial"
+                }
+            }
+        );
+
+        if (!res.ok) {
+            return {
+                content: [{ type: "text", text: `Error fetching job details: ${res.statusText}` }]
+            };
+        }
+
+        const data = await res.json();
+        const job = (data.jobs || []).find(j => j.slug === job_id || j.req_id === job_id);
+
+        if (!job) {
+            return {
+                content: [{ type: "text", text: `Job not found with ID/slug: ${job_id}` }]
+            };
+        }
+
+        return { content: [{ type: "text", text: JSON.stringify(job, null, 2) }] };
+    }
+);
+
+// ── Tool 3: Get salary info ──
+server.tool(
+    "get_salary_data",
+    "Get average salary data for a job role in a specific city.",
+    {
+        role: z.string().describe("Job title e.g. 'Data Analyst'"),
+        city: z.string().optional().describe("City name")
+    },
+    async ({ role, city }) => {
+        return {
+            content: [{
+                type: "text",
+                text: JSON.stringify({ message: "Salary benchmarks service not connected.", role, city })
             }]
         };
     }
@@ -119,54 +196,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MCP server running on port ${PORT}`);
 });
-
-// Tool 2 — Get job details
-
-server.tool(
-
-  "get_job_details",
-
-  "Get full details of a specific job listing by ID.",
-
-  { job_id: z.string().describe("The job listing ID") },
-
-  async ({ job_id }) => {
-
-    const res  = await fetch(`https://your-jobs-api.com/jobs/${job_id}`);
-
-    const data = await res.json();
-
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
-
-  }
-
-);
- 
-// Tool 3 — Get salary info
-
-server.tool(
-
-  "get_salary_data",
-
-  "Get average salary data for a job role in a specific city.",
-
-  {
-
-    role: z.string().describe("Job title e.g. 'Data Analyst'"),
-
-    city: z.string().optional().describe("City name")
-
-  },
-
-  async ({ role, city }) => {
-
-    const res  = await fetch(`https://your-jobs-api.com/salaries?role=${role}&city=${city}`);
-
-    const data = await res.json();
-
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
-
-  }
-
-);
  
