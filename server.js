@@ -22,14 +22,13 @@ server.tool(
 
     // These are the parameters Claude will fill in
     {
-        title: z.string().describe("Job title or keyword e.g. 'React developer'"),
-        location_name: z.string().optional().describe("City or 'Remote'"),
-        country: z.string().optional().describe("Country name"),
+        query: z.string().describe("Job title or keyword e.g. 'React developer'"),
+        location: z.string().optional().describe("City or 'Remote'"),
         limit: z.number().optional().describe("Max results to return, default 5")
     },
 
     // This function runs when Claude calls your tool
-    async ({ title, location_name, country, limit = 5 }) => {
+    async ({ query, location, limit = 5 }) => {
         try {
             // Fetch jobs from staging API
             const params = new URLSearchParams({ offset: "1", limit: "100" });
