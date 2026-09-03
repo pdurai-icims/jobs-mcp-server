@@ -22,29 +22,30 @@ server.tool(
 
     // These are the parameters Claude will fill in
     {
-        query: z.string().describe("Job title or keyword e.g. 'React developer'"),
-        location: z.string().optional().describe("City or 'Remote'"),
+        title: z.string().describe("Job title or keyword e.g. 'React developer'"),
+        location_name: z.string().optional().describe("City or 'Remote'"),
+        country: z.string().optional().describe("Country name"),
         limit: z.number().optional().describe("Max results to return, default 5")
     },
 
     // This function runs when Claude calls your tool
-    async ({ query, location, limit = 5 }) => {
+    async ({ title, location_name, country, limit = 5 }) => {
         try {
             // Fetch jobs from staging API
             const params = new URLSearchParams({ offset: "1", limit: "100" });
 
             const res = await fetch(
-                // `https://your-jobs-api.com/search?${params}`,
+                `https://jobs-api-9203.onrender.com/jobs?${params}`,
                 // `https://saalqngddakjvqnuldjf.supabase.co/rest/v1/jobs`,
-                `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
+                // `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
                 {
                     headers: {
                         // "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
                         "Content-Type": "application/json",
                         // "apikey": "sb_publishable_Faugw9G95-KhZErI_7O0qA_6g_jVapr",
                         // "Cookie": "__cf_bm=jKBIf4U1L3VqKq2JmCXjCuomv0.ikLQ9CwcTzboZKyg-1785390106.3807838-1.0.1.1-9rOK8esw8iUbVM3H6qFudC_2zezfaJHyFsodkU_GRJBt4zBb0jjz73AktNFTgcl2LbA7vkXO7A3NykKur0McXK7A2lEJ1nFpFeAuh7.fGL2zqk2jNxPzguiT9V7uHebd"
-                        "Accept": "application/json",
-                        "X-Jibe-Client": "mortonfinancial"
+                        // "Accept": "application/json",
+                        // "X-Jibe-Client": "mortonfinancial"
                     }
                 }
             );
