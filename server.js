@@ -16,22 +16,43 @@ const server = new McpServer({
 server.tool(
     "search_jobs",
 
-    // This description tells Claude WHEN to call your tool
-    "Search for job listings. Use this whenever the user asks about jobs, " +
-    "vacancies, salaries, or career opportunities.",
+    `Search for job postings based on the user's requirements.
 
-    // These are the parameters Claude will fill in
+Use this tool whenever the user wants to find jobs.
+
+Examples:
+- "Find React developer jobs"
+- "Show senior Java jobs in Seattle"
+- "Find jobs in Chennai"
+- "Find jobs requiring SQL"
+- "Show developer jobs in New York"
+
+The tool searches the available job postings and returns matching results.`,
+
     {
-        query: z.string().optional().describe("Job title or keyword e.g. 'React developer'"),
-        location: z.string().optional().describe("City or 'Remote'"),
-        limit: z.number().optional().describe("Max results to return, default 5")
+        query: z.string().optional().describe(
+            "Job title, skill, technology, role, or keyword to search for. Example: React developer"
+        ),
+
+        location: z.string().optional().describe(
+            "City, state, or country where the job is located. Example: Seattle"
+        ),
+
+        limit: z.number()
+            .int()
+            .min(1)
+            .max(20)
+            .optional()
+            .default(5)
+            .describe(
+                "Maximum number of jobs to return. Default is 5."
+            )
     },
 
-    // This function runs when Claude calls your tool
     async ({ query, location, limit = 5 }) => {
         try {
             // Fetch jobs from staging API
-            const params = new URLSearchParams({ offset: "1", limit: "100" });
+            const params = new URLSearchParams({ offset: "0", limit: String(limit) });
 
             const res = await fetch(
                 `https://jobs-api-9203.onrender.com/jobs?${params}`,
@@ -48,13 +69,20 @@ server.tool(
                     }
                 }
             );
-
+            
             if (!res.ok) {
+                const errorText = await res.text();
+                console.error(
+                    `Jobs API returned ${res.status}:`,
+                    errorText
+                );
                 return {
-                    content: [{
-                        type: "text",
-                        text: `Error fetching jobs from API (Status ${res.status}): ${res.statusText}`
-                    }]
+                    content: [
+                        {
+                            type: "text",
+                            text: `Unable to search jobs. Jobs API returned HTTP ${res.status}.`
+                        }
+                    ]
                 };
             }
 
