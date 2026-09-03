@@ -22,7 +22,7 @@ server.tool(
 
     // These are the parameters Claude will fill in
     {
-        query: z.string().describe("Job title or keyword e.g. 'React developer'"),
+        query: z.string().optional().describe("Job title or keyword e.g. 'React developer'"),
         location: z.string().optional().describe("City or 'Remote'"),
         limit: z.number().optional().describe("Max results to return, default 5")
     },
