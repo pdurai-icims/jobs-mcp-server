@@ -52,20 +52,21 @@ The tool searches the available job postings and returns matching results.`,
     async ({ query, location, limit = 5 }) => {
         try {
             // Fetch jobs from staging API
-            const params = new URLSearchParams({ offset: "0", limit: String(limit) });
+            const params = new URLSearchParams();
+            params.set("offset", "0");
+            params.set("limit", String(limit));
+            if (query && query.trim()) {
+                params.set("q", query);
+            }
+            if (location && location.trim()) {
+                params.set("location", location);
+            }
 
             const res = await fetch(
                 `https://jobs-api-9203.onrender.com/jobs?${params}`,
-                // `https://saalqngddakjvqnuldjf.supabase.co/rest/v1/jobs`,
-                // `https://job-service-ipipeline.staging.icimsmco.net/jobs?${params}`,
                 {
                     headers: {
-                        // "Authorization": `Bearer ${process.env.JOBS_API_KEY}`,
                         "Content-Type": "application/json",
-                        // "apikey": "sb_publishable_Faugw9G95-KhZErI_7O0qA_6g_jVapr",
-                        // "Cookie": "__cf_bm=jKBIf4U1L3VqKq2JmCXjCuomv0.ikLQ9CwcTzboZKyg-1785390106.3807838-1.0.1.1-9rOK8esw8iUbVM3H6qFudC_2zezfaJHyFsodkU_GRJBt4zBb0jjz73AktNFTgcl2LbA7vkXO7A3NykKur0McXK7A2lEJ1nFpFeAuh7.fGL2zqk2jNxPzguiT9V7uHebd"
-                        // "Accept": "application/json",
-                        // "X-Jibe-Client": "mortonfinancial"
                     }
                 }
             );
