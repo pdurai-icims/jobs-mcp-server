@@ -2,155 +2,14 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
 const app = express();
 app.use(express.json());
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const jobsFile = path.join(__dirname, "data", "jobs.json");
-
-function readJobs() {
-    const fileContent = fs.readFileSync(jobsFile, "utf8");
-    const data = JSON.parse(fileContent);
-
-    return Array.isArray(data.jobs) ? data.jobs : [];
-}
-
-function writeJobs(jobs) {
-    fs.writeFileSync(
-        jobsFile,
-        JSON.stringify({ jobs }, null, 2),
-        "utf8"
-    );
-}
 
 // ── Create MCP server ──
 const server = new McpServer({
     name: "jobs-mcp",
     version: "1.0.0"
-});
-
-app.post("/jobs", (req, res) => {
-    try {
-        const {
-            title,
-            description,
-            city,
-            state,
-            country,
-            experience,
-            skills,
-            employment_type,
-            job_type,
-            industry,
-            education_level,
-            salary_value,
-            salary_currency
-        } = req.body;
-
-        // Required fields
-        if (!title || !title.trim()) {
-            return res.status(400).json({
-                error: "title is required"
-            });
-        }
-
-        if (!description || !description.trim()) {
-            return res.status(400).json({
-                error: "description is required"
-            });
-        }
-
-        // Read existing jobs
-        const jobs = readJobs();
-
-        // Generate a unique ID
-        const id = `job-${Date.now()}`;
-
-        // Generate slug
-        const slugBase = title
-            .toLowerCase()
-            .trim()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-+|-+$/g, "");
-
-        const slug = `${slugBase}-${Date.now()}`;
-
-        const now = new Date().toISOString();
-
-        const newJob = {
-            id,
-            slug,
-
-            title: title.trim(),
-
-            description: description.trim(),
-
-            city: city?.trim() || null,
-            state: state?.trim() || null,
-            country: country?.trim() || null,
-
-            experience: experience?.trim() || null,
-
-            skills: Array.isArray(skills)
-                ? skills
-                : [],
-
-            employment_type:
-                employment_type?.trim() || null,
-
-            job_type:
-                job_type?.trim() || null,
-
-            industry:
-                industry?.trim() || null,
-
-            education_level:
-                education_level?.trim() || null,
-
-            salary_value:
-                salary_value !== undefined
-                    ? Number(salary_value)
-                    : null,
-
-            salary_currency:
-                salary_currency?.trim() || null,
-
-            searchable: true,
-            applyable: true,
-
-            created_at: now,
-            updated_at: now
-        };
-
-        // Add job
-        jobs.push(newJob);
-
-        // Save back to jobs.json
-        writeJobs(jobs);
-
-        console.log(
-            `Created job: ${newJob.id} - ${newJob.title}`
-        );
-
-        return res.status(201).json({
-            success: true,
-            job: newJob
-        });
-
-    } catch (error) {
-        console.error("Error creating job:", error);
-
-        return res.status(500).json({
-            error: "Failed to create job",
-            message: error.message
-        });
-    }
 });
 
 // ── Define your jobs tool ──
@@ -268,6 +127,226 @@ The tool searches the available job postings and returns matching results.`,
                     type: "text",
                     text: `Jobs API is currently unreachable or down. Details: ${err.message}${err.cause ? ` (${err.cause.message || err.cause})` : ""}`
                 }]
+            };
+        }
+    }
+);
+
+
+// ── Tool 2: Create Job ──
+server.tool(
+    "create_job",
+
+    `Create a new job posting in the connected Jobs API.
+
+Use this tool when the user wants to create, add, or post a job.
+
+Examples:
+- "Create a Senior React Developer job in Chennai"
+- "Add a Java Developer position in Bangalore"
+- "Create a Product Manager job"
+
+Collect the job title and description before creating the job.
+
+Do not create a job if required information is missing.`,
+
+    {
+        title: z.string()
+            .min(1)
+            .describe(
+                "Job title. Example: Senior React Developer"
+            ),
+
+        description: z.string()
+            .min(1)
+            .describe(
+                "Full job description"
+            ),
+
+        city: z.string()
+            .optional()
+            .describe(
+                "City where the job is located"
+            ),
+
+        state: z.string()
+            .optional()
+            .describe(
+                "State or province where the job is located"
+            ),
+
+        country: z.string()
+            .optional()
+            .describe(
+                "Country where the job is located"
+            ),
+
+        experience: z.string()
+            .optional()
+            .describe(
+                "Experience level. Example: Entry, Junior, Mid, Senior, Lead"
+            ),
+
+        skills: z.array(z.string())
+            .optional()
+            .describe(
+                "Required skills or technologies"
+            ),
+
+        employment_type: z.string()
+            .optional()
+            .describe(
+                "Employment type. Example: Full-time, Part-time, Contract"
+            ),
+
+        job_type: z.string()
+            .optional()
+            .describe(
+                "Work type. Example: Remote, Hybrid, On-site"
+            ),
+
+        industry: z.string()
+            .optional()
+            .describe(
+                "Industry of the job"
+            ),
+
+        education_level: z.string()
+            .optional()
+            .describe(
+                "Required education level"
+            ),
+
+        salary_value: z.number()
+            .optional()
+            .describe(
+                "Salary amount"
+            ),
+
+        salary_currency: z.string()
+            .optional()
+            .describe(
+                "Salary currency. Example: USD, INR"
+            )
+    },
+
+    async ({
+        title,
+        description,
+        city,
+        state,
+        country,
+        experience,
+        skills,
+        employment_type,
+        job_type,
+        industry,
+        education_level,
+        salary_value,
+        salary_currency
+    }) => {
+
+        try {
+
+            const response = await fetch(
+                "https://jobs-api-9203.onrender.com/jobs",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                    },
+
+                    body: JSON.stringify({
+                        title,
+                        description,
+                        city,
+                        state,
+                        country,
+                        experience,
+                        skills,
+                        employment_type,
+                        job_type,
+                        industry,
+                        education_level,
+                        salary_value,
+                        salary_currency
+                    })
+                }
+            );
+
+            const responseText = await response.text();
+
+            let data;
+
+            try {
+                data = JSON.parse(responseText);
+            } catch {
+                data = {
+                    raw: responseText
+                };
+            }
+
+            if (!response.ok) {
+
+                console.error(
+                    "Jobs API create job failed:",
+                    response.status,
+                    data
+                );
+
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text:
+                                `Unable to create job. ` +
+                                `Jobs API returned HTTP ${response.status}. ` +
+                                JSON.stringify(data)
+                        }
+                    ]
+                };
+            }
+
+            console.log(
+                "Job created successfully:",
+                data.job?.id
+            );
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                success: true,
+                                message: "Job created successfully",
+                                job: data.job
+                            },
+                            null,
+                            2
+                        )
+                    }
+                ]
+            };
+
+        } catch (error) {
+
+            console.error(
+                "create_job error:",
+                error
+            );
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text:
+                            `Jobs API is currently unreachable. ` +
+                            `Details: ${error.message}`
+                    }
+                ]
             };
         }
     }
