@@ -2,6 +2,9 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { authenticate } from "./middleware/auth";
+import { getCurrentUser } from "./middleware/requestcontext.js";
+import { hasPermission } from "./middleware/permission.js";
 
 const app = express();
 app.use(express.json());
@@ -248,6 +251,19 @@ Do not create a job if required information is missing.`,
 
         try {
 
+            const user = getCurrentUser();
+
+            if (!hasPermission(user, "jobs:create")) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: "You do not have permission to create jobs."
+                    }],
+                    isError: true,
+                    status: 403
+                };
+            }
+
             const response = await fetch(
                 "https://jobs-api-9203.onrender.com/jobs",
                 {
@@ -416,20 +432,53 @@ server.tool(
 
 // ── MCP HTTP endpoint ──
 // Claude.ai connects to this URL
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", authenticate, async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined
     });
 
-    res.on("close", () => transport.close());
+    res.on("close", () => {
+        transport.close();
+    });
+
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+
+    await requestContext.run(req.user, async () => {
+        await transport.handleRequest(
+            req,
+            res,
+            req.body
+        );
+    });
 });
 
 // Health check — useful for deployment platforms
 app.get("/", (req, res) => {
     res.json({ status: "ok", name: "Jobs MCP Server" });
 });
+
+app.get(
+    "/.well-known/oauth-protected-resource",
+    (req, res) => {
+        res.json({
+            resource:
+                "https://jobs-mcp-server.onrender.com/mcp",
+
+            authorization_servers: [
+                "https://dev-duromcyrubs0205n.us.auth0.com"
+            ],
+
+            scopes_supported: [
+                "jobs:read",
+                "jobs:create"
+            ],
+
+            bearer_methods_supported: [
+                "header"
+            ]
+        });
+    }
+);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
