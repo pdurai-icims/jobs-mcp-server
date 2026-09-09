@@ -17,47 +17,43 @@ const JWKS = createRemoteJWKSet(
     new URL(`${issuer}.well-known/jwks.json`)
 );
 
-export async function authenticate(req, res, next) {
+export async function getAuthenticatedUser(req) {
+
+    const authorization =
+        req.headers.authorization;
+
+    if (!authorization) {
+        return null;
+    }
+
+    const [scheme, token] =
+        authorization.split(" ");
+
+    if (scheme !== "Bearer" || !token) {
+        return null;
+    }
+
     try {
-        const authorization = req.headers.authorization;
 
-        if (!authorization) {
-            res.setHeader(
-                "WWW-Authenticate",
-                `Bearer resource_metadata="https://jobs-mcp-server.onrender.com/.well-known/oauth-protected-resource", scope="jobs:read jobs:create"`
-            );
+        const { payload } = await jwtVerify(
+            token,
+            JWKS,
+            {
+                issuer,
+                audience: AUTH0_AUDIENCE,
+                algorithms: ["RS256"]
+            }
+        );
 
-            return res.status(401).json({
-                error: "Unauthorized"
-            });
-        }
-
-        const [scheme, token] = authorization.split(" ");
-
-        if (scheme !== "Bearer" || !token) {
-            return res.status(401).json({
-                error: "Invalid Authorization header"
-            });
-        }
-
-        const { payload } = await jwtVerify(token, JWKS, {
-            issuer,
-            audience: AUTH0_AUDIENCE,
-            algorithms: ["RS256"]
-        });
-
-        req.user = payload;
-
-        next();
+        return payload;
 
     } catch (error) {
+
         console.error(
-            "Authentication failed:",
+            "Token validation failed:",
             error.message
         );
 
-        return res.status(401).json({
-            error: "Invalid or expired access token"
-        });
+        return null;
     }
 }

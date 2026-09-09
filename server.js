@@ -2,9 +2,8 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { authenticate } from "./middleware/auth.js";
-import { getCurrentUser } from "./middleware/requestcontext.js";
-import { hasPermission } from "./middleware/permission.js";
+import { getCurrentUser, requestContext } from "./middleware/requestcontext.js";
+import { getAuthenticatedUser } from "./middleware/auth.js";
 
 const app = express();
 app.use(express.json());
@@ -99,7 +98,10 @@ The tool searches the available job postings and returns matching results.`,
                 jobs = jobs.filter(j =>
                     (j.title && j.title.toLowerCase().includes(q)) ||
                     (j.description && j.description.toLowerCase().includes(q)) ||
-                    (j.skills && j.skills.toLowerCase().includes(q))
+                    (Array.isArray(j.skills) &&
+                        j.skills.some(skill =>
+                            String(skill).toLowerCase().includes(q)
+                        ))
                 );
             }
 
@@ -251,19 +253,6 @@ Do not create a job if required information is missing.`,
 
         try {
 
-            const user = getCurrentUser();
-
-            if (!hasPermission(user, "jobs:create")) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: "You do not have permission to create jobs."
-                    }],
-                    isError: true,
-                    status: 403
-                };
-            }
-
             const response = await fetch(
                 "https://jobs-api-9203.onrender.com/jobs",
                 {
@@ -412,44 +401,58 @@ server.tool(
     }
 );
 
-// ── Tool 3: Get salary info ──
-server.tool(
-    "get_salary_data",
-    "Get average salary data for a job role in a specific city.",
-    {
-        role: z.string().describe("Job title e.g. 'Data Analyst'"),
-        city: z.string().optional().describe("City name")
-    },
-    async ({ role, city }) => {
-        return {
-            content: [{
-                type: "text",
-                text: JSON.stringify({ message: "Salary benchmarks service not connected.", role, city })
-            }]
-        };
-    }
-);
-
 // ── MCP HTTP endpoint ──
 // Claude.ai connects to this URL
-app.post("/mcp", authenticate, async (req, res) => {
-    const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined
-    });
+app.post("/mcp", async (req, res) => {
+    try {
+        const user = await getAuthenticatedUser(req);
 
-    res.on("close", () => {
-        transport.close();
-    });
+        // Check whether this MCP request is attempting to call create_job
+        const isCreateJobRequest =
+            req.body?.method === "tools/call" &&
+            req.body?.params?.name === "create_job";
 
-    await server.connect(transport);
+        // create_job requires authentication
+        if (isCreateJobRequest && !user) {
+            res.setHeader(
+                "WWW-Authenticate",
+                'Bearer resource_metadata="https://jobs-mcp-server.onrender.com/.well-known/oauth-protected-resource"'
+            );
 
-    await requestContext.run(req.user, async () => {
-        await transport.handleRequest(
-            req,
-            res,
-            req.body
-        );
-    });
+            return res.status(401).json({
+                error: "Authentication required",
+                message: "Authentication is required to create a job."
+            });
+        }
+
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined
+        });
+
+        res.on("close", () => {
+            transport.close();
+        });
+
+        await server.connect(transport);
+
+        await requestContext.run(user, async () => {
+            await transport.handleRequest(
+                req,
+                res,
+                req.body
+            );
+        });
+
+    } catch (error) {
+        console.error("MCP request error:", error);
+
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: "MCP server error",
+                message: error.message
+            });
+        }
+    }
 });
 
 // Health check — useful for deployment platforms
@@ -468,10 +471,9 @@ app.get(
                 "https://dev-duromcyrubs0205n.us.auth0.com"
             ],
 
-            scopes_supported: [
-                "jobs:read",
-                "jobs:create"
-            ],
+            // scopes_supported: [
+            //     "jobs:create"
+            // ],
 
             bearer_methods_supported: [
                 "header"
