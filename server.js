@@ -98,10 +98,7 @@ The tool searches the available job postings and returns matching results.`,
                 jobs = jobs.filter(j =>
                     (j.title && j.title.toLowerCase().includes(q)) ||
                     (j.description && j.description.toLowerCase().includes(q)) ||
-                    (Array.isArray(j.skills) &&
-                        j.skills.some(skill =>
-                            String(skill).toLowerCase().includes(q)
-                        ))
+                    (j.skills && j.skills.toLowerCase().includes(q))
                 );
             }
 
@@ -468,12 +465,13 @@ app.get(
                 "https://jobs-mcp-server.onrender.com/mcp",
 
             authorization_servers: [
-                "https://dev-duromcyrubs0205n.us.auth0.com"
+                "https://dev-duromcyrubs02o5n.us.auth0.com"
             ],
 
-            // scopes_supported: [
-            //     "jobs:create"
-            // ],
+            scopes_supported: [
+                "jobs:read",
+                "jobs:create"
+            ],
 
             bearer_methods_supported: [
                 "header"
