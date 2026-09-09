@@ -468,10 +468,10 @@ app.get(
                 "https://dev-duromcyrubs02o5n.us.auth0.com"
             ],
 
-            scopes_supported: [
-                "jobs:read",
-                "jobs:create"
-            ],
+            // scopes_supported: [
+            //     "jobs:read",
+            //     "jobs:create"
+            // ],
 
             bearer_methods_supported: [
                 "header"
@@ -503,12 +503,12 @@ app.get(
 
             code_challenge_methods_supported: [
                 "S256"
-            ],
-
-            scopes_supported: [
-                "jobs:read",
-                "jobs:create"
             ]
+
+            // scopes_supported: [
+            //     "jobs:read",
+            //     "jobs:create"
+            // ]
         });
     }
 );
