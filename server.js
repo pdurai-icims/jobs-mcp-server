@@ -457,61 +457,55 @@ app.get("/", (req, res) => {
     res.json({ status: "ok", name: "Jobs MCP Server" });
 });
 
-app.get(
-    "/.well-known/oauth-protected-resource",
-    (req, res) => {
-        res.json({
-            resource:
-                "https://jobs-mcp-server.onrender.com/mcp",
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+    res.json({
+        resource: "https://jobs-mcp-server.onrender.com/mcp",
+        authorization_servers: [
+            "https://jobs-mcp-server.onrender.com"  // ← your server, not Auth0
+        ],
+        bearer_methods_supported: ["header"]
+    });
+});
 
-            authorization_servers: [
-                "https://dev-duromcyrubs02o5n.us.auth0.com"
-            ],
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    res.json({
+        issuer: "https://jobs-mcp-server.onrender.com",  // ← your server
+        authorization_endpoint: "https://dev-duromcyrubs02o5n.us.auth0.com/authorize",
+        token_endpoint: "https://jobs-mcp-server.onrender.com/token",  // ← your proxy
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"]
+    });
+});
 
-            // scopes_supported: [
-            //     "jobs:read",
-            //     "jobs:create"
-            // ],
+app.post("/token", express.urlencoded({ extended: true }), async (req, res) => {
+    try {
+        console.log("Token proxy received:", req.body); // ← debug log
 
-            bearer_methods_supported: [
-                "header"
-            ]
+        const body = new URLSearchParams({
+            ...req.body,
+            client_id: process.env.AUTH0_CLIENT_ID,
+            client_secret: process.env.AUTH0_CLIENT_SECRET,
         });
+
+        const response = await fetch(
+            "https://dev-duromcyrubs02o5n.us.auth0.com/oauth/token",
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: body.toString()
+            }
+        );
+
+        const data = await response.json();
+        console.log("Auth0 token response:", response.status, data); // ← debug log
+
+        res.status(response.status).json(data);
+    } catch (err) {
+        console.error("Token proxy error:", err);
+        res.status(500).json({ error: "token_proxy_error", message: err.message });
     }
-);
-
-app.get(
-    "/.well-known/oauth-authorization-server",
-    (req, res) => {
-        res.json({
-            issuer:
-                "https://dev-duromcyrubs02o5n.us.auth0.com/",
-
-            authorization_endpoint:
-                "https://dev-duromcyrubs02o5n.us.auth0.com/authorize",
-
-            token_endpoint:
-                "https://dev-duromcyrubs02o5n.us.auth0.com/oauth/token",
-
-            response_types_supported: [
-                "code"
-            ],
-
-            grant_types_supported: [
-                "authorization_code"
-            ],
-
-            code_challenge_methods_supported: [
-                "S256"
-            ]
-
-            // scopes_supported: [
-            //     "jobs:read",
-            //     "jobs:create"
-            // ]
-        });
-    }
-);
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
