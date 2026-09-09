@@ -2,7 +2,7 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { authenticate } from "./middleware/auth";
+import { authenticate } from "./middleware/auth.js";
 import { getCurrentUser } from "./middleware/requestcontext.js";
 import { hasPermission } from "./middleware/permission.js";
 
