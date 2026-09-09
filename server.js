@@ -404,21 +404,19 @@ app.post("/mcp", async (req, res) => {
     try {
         const user = await getAuthenticatedUser(req);
 
-        // Check whether this MCP request is attempting to call create_job
-        const isCreateJobRequest =
-            req.body?.method === "tools/call" &&
-            req.body?.params?.name === "create_job";
-
-        // create_job requires authentication
-        if (isCreateJobRequest && !user) {
+        // Always require authentication — not just for create_job
+        if (!user) {
             res.setHeader(
                 "WWW-Authenticate",
                 'Bearer resource_metadata="https://jobs-mcp-server.onrender.com/.well-known/oauth-protected-resource"'
             );
-
             return res.status(401).json({
-                error: "Authentication required",
-                message: "Authentication is required to create a job."
+                jsonrpc: "2.0",
+                error: {
+                    code: -32001,
+                    message: "Authentication required"
+                },
+                id: req.body?.id ?? null
             });
         }
 
@@ -426,28 +424,17 @@ app.post("/mcp", async (req, res) => {
             sessionIdGenerator: undefined
         });
 
-        res.on("close", () => {
-            transport.close();
-        });
-
+        res.on("close", () => transport.close());
         await server.connect(transport);
 
         await requestContext.run(user, async () => {
-            await transport.handleRequest(
-                req,
-                res,
-                req.body
-            );
+            await transport.handleRequest(req, res, req.body);
         });
 
     } catch (error) {
         console.error("MCP request error:", error);
-
         if (!res.headersSent) {
-            res.status(500).json({
-                error: "MCP server error",
-                message: error.message
-            });
+            res.status(500).json({ error: "MCP server error", message: error.message });
         }
     }
 });
