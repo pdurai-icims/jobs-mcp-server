@@ -480,6 +480,39 @@ app.get(
     }
 );
 
+app.get(
+    "/.well-known/oauth-authorization-server",
+    (req, res) => {
+        res.json({
+            issuer:
+                "https://dev-duromcyrubs02o5n.us.auth0.com/",
+
+            authorization_endpoint:
+                "https://dev-duromcyrubs02o5n.us.auth0.com/authorize",
+
+            token_endpoint:
+                "https://dev-duromcyrubs02o5n.us.auth0.com/oauth/token",
+
+            response_types_supported: [
+                "code"
+            ],
+
+            grant_types_supported: [
+                "authorization_code"
+            ],
+
+            code_challenge_methods_supported: [
+                "S256"
+            ],
+
+            scopes_supported: [
+                "jobs:read",
+                "jobs:create"
+            ]
+        });
+    }
+);
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MCP server running on port ${PORT}`);
