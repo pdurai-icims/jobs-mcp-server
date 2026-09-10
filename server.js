@@ -362,11 +362,10 @@ server.tool(
     async ({ job_id }) => {
         try {
             const res = await fetch(
-                `https://job-service-ipipeline.staging.icimsmco.net/jobs?offset=1&limit=100`,
+                `https://jobs-api-9203.onrender.com/jobs`,
                 {
                     headers: {
-                        "Accept": "application/json",
-                        "X-Jibe-Client": "mortonfinancial"
+                        "Content-Type": "application/json",
                     }
                 }
             );
