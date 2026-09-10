@@ -1,59 +1,40 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import jwt from "jsonwebtoken";
+import jwksClient from "jwks-rsa";
 
-const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
-const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE;
+const client = jwksClient({
+    jwksUri: "https://dev-duromcyrubs02o5n.us.auth0.com/.well-known/jwks.json"
+});
 
-if (!AUTH0_DOMAIN) {
-    throw new Error("AUTH0_DOMAIN is not configured");
+function getKey(header, callback) {
+    client.getSigningKey(header.kid, (err, key) => {
+        if (err) return callback(err);
+        callback(null, key.getPublicKey());
+    });
 }
-
-if (!AUTH0_AUDIENCE) {
-    throw new Error("AUTH0_AUDIENCE is not configured");
-}
-
-const issuer = `https://${AUTH0_DOMAIN}/`;
-
-const JWKS = createRemoteJWKSet(
-    new URL(`${issuer}.well-known/jwks.json`)
-);
 
 export async function getAuthenticatedUser(req) {
+    const authHeader = req.headers["authorization"];
+    if (!authHeader?.startsWith("Bearer ")) return null;
 
-    const authorization =
-        req.headers.authorization;
+    const token = authHeader.split(" ")[1];
 
-    if (!authorization) {
-        return null;
-    }
-
-    const [scheme, token] =
-        authorization.split(" ");
-
-    if (scheme !== "Bearer" || !token) {
-        return null;
-    }
-
-    try {
-
-        const { payload } = await jwtVerify(
+    return new Promise((resolve, reject) => {
+        jwt.verify(
             token,
-            JWKS,
+            getKey,
             {
-                issuer,
-                audience: AUTH0_AUDIENCE,
+                audience: "https://jobs-mcp-server.onrender.com/mcp",
+                issuer: "https://dev-duromcyrubs02o5n.us.auth0.com/",  // ← trailing slash required
                 algorithms: ["RS256"]
+            },
+            (err, decoded) => {
+                if (err) {
+                    console.error("Token validation failed:", err.message);
+                    resolve(null);  // ← resolve null, don't reject (avoids 500)
+                } else {
+                    resolve(decoded);
+                }
             }
         );
-
-        return payload;
-
-    } catch (error) {
-
-        console.error(
-            "Token validation failed:",
-            error.message
-        );
-
-        return null;
-    }
+    });
 }
