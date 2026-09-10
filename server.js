@@ -473,6 +473,7 @@ app.post("/token", express.urlencoded({ extended: true }), async (req, res) => {
             ...req.body,
             client_id: process.env.AUTH0_CLIENT_ID,
             client_secret: process.env.AUTH0_CLIENT_SECRET,
+            audience: "https://jobs-mcp-server.onrender.com/mcp"
         });
 
         const response = await fetch(
