@@ -184,6 +184,7 @@ Do not create a job if required information is missing.`,
             ),
 
         experience: z.string()
+            .min(1)
             .describe(
                 "Number of years of experience required. Example: 3 years, 10 years"
             ),
