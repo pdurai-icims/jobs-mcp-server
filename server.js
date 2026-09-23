@@ -184,9 +184,8 @@ Do not create a job if required information is missing.`,
             ),
 
         experience: z.string()
-            .optional()
             .describe(
-                "Experience level. Example: Entry, Junior, Mid, Senior, Lead"
+                "Number of years of experience required. Example: 3 years, 10 years"
             ),
 
         skills: z.array(z.string())
