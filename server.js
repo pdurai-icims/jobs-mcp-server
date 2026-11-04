@@ -1,14 +1,16 @@
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { getCurrentUser, requestContext } from "./middleware/requestcontext.js";
 import { getAuthenticatedUser } from "./middleware/auth.js";
+import { createMcpHandler } from "./middleware/mcp.js";
+import { registerUpdateJob } from "./update-job.js";
 
 const app = express();
 app.use(express.json());
 
 // ── Create MCP server ──
+export function createJobsServer() {
 const server = new McpServer({
     name: "jobs-mcp",
     version: "1.0.0"
@@ -398,45 +400,15 @@ server.tool(
 );
 
 // ── MCP HTTP endpoint ──
+registerUpdateJob(server);
+return server;
+}
+
 // Claude.ai connects to this URL
-app.post("/mcp", async (req, res) => {
-    try {
-        const user = await getAuthenticatedUser(req);
-
-        // Always require authentication — not just for create_job
-        if (!user) {
-            res.setHeader(
-                "WWW-Authenticate",
-                'Bearer resource_metadata="https://jobs-mcp-server.onrender.com/.well-known/oauth-protected-resource"'
-            );
-            return res.status(401).json({
-                jsonrpc: "2.0",
-                error: {
-                    code: -32001,
-                    message: "Authentication required"
-                },
-                id: req.body?.id ?? null
-            });
-        }
-
-        const transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: undefined
-        });
-
-        res.on("close", () => transport.close());
-        await server.connect(transport);
-
-        await requestContext.run(user, async () => {
-            await transport.handleRequest(req, res, req.body);
-        });
-
-    } catch (error) {
-        console.error("MCP request error:", error);
-        if (!res.headersSent) {
-            res.status(500).json({ error: "MCP server error", message: error.message });
-        }
-    }
-});
+const mcpHandler = createMcpHandler(createJobsServer, getAuthenticatedUser);
+app.post("/mcp", mcpHandler);
+app.get("/mcp", mcpHandler);
+app.delete("/mcp", mcpHandler);
 
 // Health check — useful for deployment platforms
 app.get("/", (req, res) => {
@@ -495,6 +467,8 @@ app.post("/token", express.urlencoded({ extended: true }), async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`MCP server running on port ${PORT}`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    app.listen(PORT, () => {
+        console.log(`MCP server running on port ${PORT}`);
+    });
+}
