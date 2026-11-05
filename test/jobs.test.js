@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -70,6 +71,8 @@ function mockJobsApi(t, respond = () => Response.json({ success: true, job: { sl
 const approve = () => ({ action: "accept", content: { confirm: true } });
 const update = (client, updates = { title: "Senior Developer" }, slug = "developer") =>
     client.callTool({ name: "update_job", arguments: { slug, updates } });
+const confirmUpdate = (client, confirmation_id, confirm = true) =>
+    client.callTool({ name: "confirm_job_update", arguments: { confirmation_id, confirm } });
 
 test("update waits for explicit approval and PATCHes only the displayed changes", { timeout: 15000 }, async t => {
     const calls = mockJobsApi(t);
@@ -119,12 +122,123 @@ for (const confirmation of [
     });
 }
 
-test("clients without confirmation support cannot update", async t => {
+test("clients without dialogs preview changes, then apply only after separate confirmation", async t => {
     const calls = mockJobsApi(t);
     const { client } = await connect(t);
-    const result = await update(client);
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /does not support/);
+    const updates = { title: "Senior Developer", salary_value: null, skills: [], searchable: false };
+    const result = await update(client, updates, "developer/special?id=1");
+    assert.equal(result.isError, false);
+    const preview = JSON.parse(result.content[0].text);
+    assert.equal(preview.status, "confirmation_required");
+    assert.equal(preview.slug, "developer/special?id=1");
+    assert.deepEqual(preview.updates, updates);
+    assert.match(preview.message, /STOP until the user replies/);
+    assert.equal(calls.length, 0);
+
+    const confirmed = await confirmUpdate(client, preview.confirmation_id);
+    assert.equal(confirmed.isError, false);
+    assert.equal(JSON.parse(confirmed.content[0].text).success, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://jobs-api-9203.onrender.com/jobs/developer%2Fspecial%3Fid%3D1");
+    assert.equal(calls[0].method, "PATCH");
+    assert.deepEqual(JSON.parse(calls[0].body), updates);
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
+    assert.equal(calls.length, 1);
+});
+
+test("chat cancellation consumes the confirmation without updating", async t => {
+    const calls = mockJobsApi(t);
+    const { client } = await connect(t);
+    const preview = JSON.parse((await update(client)).content[0].text);
+    const cancelled = await confirmUpdate(client, preview.confirmation_id, false);
+    assert.match(cancelled.content[0].text, /cancelled/);
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
+    assert.equal(calls.length, 0);
+});
+
+test("chat confirmation requires a valid preview and explicit boolean without replacement fields", async t => {
+    const calls = mockJobsApi(t);
+    const { client } = await connect(t);
+    assert.equal((await confirmUpdate(client, randomUUID())).isError, true);
+    const preview = JSON.parse((await update(client)).content[0].text);
+    for (const args of [
+        { confirmation_id: preview.confirmation_id },
+        { confirmation_id: preview.confirmation_id, confirm: "true" },
+        { confirmation_id: preview.confirmation_id, confirm: true, slug: "other-job" },
+        { confirmation_id: preview.confirmation_id, confirm: true, updates: { title: "Changed" } },
+        { confirmation_id: randomUUID(), confirm: true }
+    ]) {
+        const result = await client.callTool({ name: "confirm_job_update", arguments: args });
+        assert.equal(result.isError, true);
+    }
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, false);
+    assert.deepEqual(JSON.parse(calls[0].body), preview.updates);
+});
+
+test("new previews replace older pending changes", async t => {
+    const calls = mockJobsApi(t);
+    const { client } = await connect(t);
+    const first = JSON.parse((await update(client, { title: "Old" }, "old-job")).content[0].text);
+    const second = JSON.parse((await update(client, { title: "New" }, "new-job")).content[0].text);
+    assert.notEqual(first.confirmation_id, second.confirmation_id);
+    assert.equal((await confirmUpdate(client, first.confirmation_id)).isError, true);
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmUpdate(client, second.confirmation_id)).isError, false);
+    assert.ok(calls[0].url.endsWith("/new-job"));
+    assert.deepEqual(JSON.parse(calls[0].body), { title: "New" });
+});
+
+test("chat confirmations cannot be used in other sessions, even for the same user", async t => {
+    const calls = mockJobsApi(t);
+    const first = await connect(t);
+    const second = await connect(t);
+    const third = await connect(t, undefined, "user-two");
+    const preview = JSON.parse((await update(first.client)).content[0].text);
+    for (const { client } of [second, third]) {
+        assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
+    }
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmUpdate(first.client, preview.confirmation_id)).isError, false);
+    assert.equal(calls.length, 1);
+});
+
+test("duplicate concurrent chat confirmations send only one PATCH", { timeout: 15000 }, async t => {
+    let finishUpdate;
+    let apiStarted;
+    const started = new Promise(resolve => { apiStarted = resolve; });
+    const calls = mockJobsApi(t, () => {
+        apiStarted();
+        return new Promise(resolve => { finishUpdate = resolve; });
+    });
+    const { client } = await connect(t);
+    const preview = JSON.parse((await update(client)).content[0].text);
+    const pending = confirmUpdate(client, preview.confirmation_id);
+    await started;
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
+    finishUpdate(Response.json({ success: true, job: { slug: preview.slug } }));
+    assert.equal((await pending).isError, false);
+    assert.equal(calls.length, 1);
+});
+
+test("failed chat updates report errors and cannot reuse the confirmation", async t => {
+    const calls = mockJobsApi(t, () => new Response("Update failed", { status: 500 }));
+    const { client } = await connect(t);
+    const preview = JSON.parse((await update(client)).content[0].text);
+    const failed = await confirmUpdate(client, preview.confirmation_id);
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /HTTP 500/);
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
+    assert.equal(calls.length, 1);
+});
+
+test("invalid updates cannot create a chat preview", async t => {
+    const calls = mockJobsApi(t);
+    const { client } = await connect(t);
+    for (const updates of [{}, { title: " " }, { unknown: true }]) {
+        assert.equal((await update(client, updates)).isError, true);
+    }
+    assert.equal((await confirmUpdate(client, randomUUID())).isError, true);
     assert.equal(calls.length, 0);
 });
 
@@ -246,7 +360,7 @@ test("existing search, details and create tools still work", async t => {
     const { client } = await connect(t);
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map(tool => tool.name).sort(), [
-        "create_job", "get_job_details", "search_jobs", "update_job"
+        "confirm_job_update", "create_job", "get_job_details", "search_jobs", "update_job"
     ]);
     const search = await client.callTool({
         name: "search_jobs", arguments: { query: "Developer", location: "Chennai" }
