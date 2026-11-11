@@ -74,6 +74,182 @@ const update = (client, updates = { title: "Senior Developer" }, slug = "develop
 const confirmUpdate = (client, confirmation_id, confirm = true) =>
     client.callTool({ name: "confirm_job_update", arguments: { confirmation_id, confirm } });
 
+const newJob = { title: "Developer", description: "Build applications", experience: "3 years" };
+const create = (client, job = newJob) =>
+    client.callTool({ name: "create_job", arguments: job });
+const confirmCreation = (client, confirmation_id, confirm = true) =>
+    client.callTool({ name: "confirm_job_creation", arguments: { confirmation_id, confirm } });
+const createdResponse = () => Response.json({ success: true, job: { id: 42, ...newJob } });
+
+test("creation previews every supplied field and waits for explicit dialog approval", { timeout: 15000 }, async t => {
+    const calls = mockJobsApi(t, createdResponse);
+    let approveDialog;
+    let dialogShown;
+    const shown = new Promise(resolve => { dialogShown = resolve; });
+    const job = {
+        ...newJob, city: "Chennai", state: "Tamil Nadu", country: "India",
+        skills: ["React"], employment_type: "Full-time", job_type: "Hybrid",
+        industry: "Software", education_level: "Degree", salary_value: 0, salary_currency: "INR"
+    };
+    const { client } = await connect(t, request => {
+        assert.deepEqual(JSON.parse(request.params.message.split("\n").slice(1).join("\n")), job);
+        assert.equal(request.params.requestedSchema.properties.confirm.default, false);
+        dialogShown();
+        return new Promise(resolve => { approveDialog = resolve; });
+    });
+    const pending = create(client, job);
+    await shown;
+    assert.equal(calls.length, 0);
+    approveDialog(approve());
+    const result = await pending;
+    assert.equal(result.isError, false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].url, "https://jobs-api-9203.onrender.com/jobs");
+    assert.deepEqual(JSON.parse(calls[0].body), job);
+    const data = JSON.parse(result.content[0].text);
+    assert.equal(data.job_id, 42);
+    assert.deepEqual(data.job, { id: 42, ...newJob });
+});
+
+for (const confirmation of [
+    { action: "decline" }, { action: "cancel" },
+    { action: "accept", content: { confirm: false } },
+    { action: "accept", content: {} },
+    { action: "accept", content: { confirm: "true" } }
+]) {
+    test(`does not create for ${JSON.stringify(confirmation)}`, async t => {
+        const calls = mockJobsApi(t, createdResponse);
+        const { client } = await connect(t, () => confirmation);
+        const result = await create(client);
+        assert.equal(calls.length, 0);
+        assert.match(result.content[0].text, /cancelled|Unable to complete/);
+    });
+}
+
+test("creation chat previews are session-bound, immutable, replaceable, and single-use", async t => {
+    const calls = mockJobsApi(t, createdResponse);
+    const { client } = await connect(t);
+    const other = await connect(t);
+    const old = JSON.parse((await create(client)).content[0].text);
+    const preview = JSON.parse((await create(client, { ...newJob, title: "Senior Developer" })).content[0].text);
+    assert.equal(preview.status, "confirmation_required");
+    assert.match(preview.message, /STOP until the user replies/);
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmCreation(client, old.confirmation_id)).isError, true);
+    assert.equal((await confirmCreation(other.client, preview.confirmation_id)).isError, true);
+    for (const args of [
+        { confirmation_id: preview.confirmation_id },
+        { confirmation_id: preview.confirmation_id, confirm: "true" },
+        { confirmation_id: preview.confirmation_id, confirm: true, job: newJob }
+    ]) {
+        assert.equal((await client.callTool({ name: "confirm_job_creation", arguments: args })).isError, true);
+    }
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, false);
+    assert.deepEqual(JSON.parse(calls[0].body), preview.job);
+    assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, true);
+    assert.equal(calls.length, 1);
+    const cancelled = JSON.parse((await create(client)).content[0].text);
+    assert.match((await confirmCreation(client, cancelled.confirmation_id, false)).content[0].text, /cancelled/);
+    assert.equal((await confirmCreation(client, cancelled.confirmation_id)).isError, true);
+    assert.equal(calls.length, 1);
+});
+
+test("creation validates required and optional values before presenting a preview", async t => {
+    const calls = mockJobsApi(t, createdResponse);
+    const { client } = await connect(t, () => assert.fail("Invalid inputs must not show a dialog"));
+    for (const field of ["title", "description", "experience"]) {
+        const job = { ...newJob };
+        delete job[field];
+        assert.equal((await create(client, job)).isError, true);
+    }
+    for (const invalid of [
+        { title: " " }, { description: "" }, { experience: " " },
+        { city: " " }, { state: 1 }, { country: null }, { skills: [" "] },
+        { skills: "React" }, { employment_type: "" }, { job_type: " " },
+        { industry: "" }, { education_level: "" }, { salary_value: -1 },
+        { salary_value: "100" }, { salary_currency: "XYZ" }, { salary_currency: "US" },
+        { unknown: true }
+    ]) {
+        assert.equal((await create(client, { ...newJob, ...invalid })).isError, true);
+    }
+    assert.equal(calls.length, 0);
+});
+
+test("configured creation defaults appear in previews and explicit values override them", async t => {
+    const settings = {
+        DEFAULT_EMPLOYMENT_TYPE: "Full-time",
+        DEFAULT_JOB_TYPE: "On-site",
+        DEFAULT_SALARY_CURRENCY: "usd"
+    };
+    for (const [key, value] of Object.entries(settings)) {
+        const previous = process.env[key];
+        t.after(() => {
+            if (previous === undefined) delete process.env[key];
+            else process.env[key] = previous;
+        });
+        process.env[key] = value;
+    }
+    const calls = mockJobsApi(t, createdResponse);
+    const { client } = await connect(t);
+    const { tools } = await client.listTools();
+    const schema = tools.find(tool => tool.name === "create_job").inputSchema;
+    assert.deepEqual(schema.required, ["title", "description", "experience"]);
+    assert.equal(schema.properties.employment_type.default, "Full-time");
+    assert.equal(schema.properties.job_type.default, "On-site");
+    assert.equal(schema.properties.salary_currency.default, "USD");
+    const preview = JSON.parse((await create(client)).content[0].text);
+    assert.deepEqual(preview.job, {
+        ...newJob, employment_type: "Full-time", job_type: "On-site", salary_currency: "USD"
+    });
+    const explicit = JSON.parse((await create(client, {
+        ...newJob, title: " Developer ", employment_type: "Contract", job_type: "Remote", salary_currency: "inr"
+    })).content[0].text);
+    assert.deepEqual(explicit.job, {
+        ...newJob, employment_type: "Contract", job_type: "Remote", salary_currency: "INR"
+    });
+    assert.equal((await confirmCreation(client, explicit.confirmation_id)).isError, false);
+    assert.deepEqual(JSON.parse(calls[0].body), explicit.job);
+});
+
+test("unconfigured optional creation fields remain omitted and invalid defaults fail explicitly", async t => {
+    for (const key of ["DEFAULT_EMPLOYMENT_TYPE", "DEFAULT_JOB_TYPE", "DEFAULT_SALARY_CURRENCY"]) {
+        const previous = process.env[key];
+        t.after(() => {
+            if (previous === undefined) delete process.env[key];
+            else process.env[key] = previous;
+        });
+        delete process.env[key];
+    }
+    const calls = mockJobsApi(t, createdResponse);
+    const { client } = await connect(t);
+    assert.deepEqual(JSON.parse((await create(client)).content[0].text).job, newJob);
+    assert.equal(calls.length, 0);
+    process.env.DEFAULT_SALARY_CURRENCY = "INVALID";
+    assert.throws(() => createJobsServer(), /currency|format/i);
+});
+
+for (const [name, respond] of [
+    ["HTTP failure", () => new Response("Unavailable", { status: 503 })],
+    ["network failure", () => { throw new Error("Connection lost"); }],
+    ["invalid JSON", () => new Response("not JSON")],
+    ["missing ID", () => Response.json({ success: true, job: newJob })],
+    ["empty ID", () => Response.json({ job: { id: " " } })],
+    ["explicit failure", () => Response.json({ success: false, job: { id: 42 } })]
+]) {
+    test(`creation surfaces ${name} and consumes confirmation`, async t => {
+        const calls = mockJobsApi(t, respond);
+        const { client } = await connect(t);
+        const preview = JSON.parse((await create(client)).content[0].text);
+        const result = await confirmCreation(client, preview.confirmation_id);
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /Check existing jobs before retrying/);
+        assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, true);
+        assert.equal(calls.length, 1);
+    });
+}
+
 test("update waits for explicit approval and PATCHes only the displayed changes", { timeout: 15000 }, async t => {
     const calls = mockJobsApi(t);
     let approveDialog;
@@ -353,14 +529,14 @@ test("authenticates session requests and rejects another user's session access",
 });
 
 test("existing search, details and create tools still work", async t => {
-    const job = { slug: "developer", req_id: "REQ-1", title: "Developer", description: "Build", city: "Chennai" };
+    const job = { id: 42, slug: "developer", req_id: "REQ-1", title: "Developer", description: "Build", city: "Chennai" };
     const calls = mockJobsApi(t, (_url, init) =>
         Response.json(init?.method === "POST" ? { job } : { jobs: [job] })
     );
     const { client } = await connect(t);
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map(tool => tool.name).sort(), [
-        "confirm_job_update", "create_job", "get_job_details", "search_jobs", "update_job"
+        "confirm_job_creation", "confirm_job_update", "create_job", "get_job_details", "search_jobs", "update_job"
     ]);
     const search = await client.callTool({
         name: "search_jobs", arguments: { query: "Developer", location: "Chennai" }
@@ -368,9 +544,13 @@ test("existing search, details and create tools still work", async t => {
     assert.equal(JSON.parse(search.content[0].text).count, 1);
     const details = await client.callTool({ name: "get_job_details", arguments: { job_id: "REQ-1" } });
     assert.equal(JSON.parse(details.content[0].text).slug, "developer");
-    const created = await client.callTool({
+    const previewResult = await client.callTool({
         name: "create_job", arguments: { title: "Developer", description: "Build", experience: "3 years" }
     });
+    const preview = JSON.parse(previewResult.content[0].text);
+    assert.equal(preview.status, "confirmation_required");
+    assert.equal(calls.length, 2);
+    const created = await confirmCreation(client, preview.confirmation_id);
     assert.equal(JSON.parse(created.content[0].text).success, true);
     assert.equal(calls.length, 3);
 });

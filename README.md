@@ -3,6 +3,43 @@
 Run `npm start` to serve the authenticated MCP endpoint at `/mcp`.
 Run `npm test` for local tests (the Jobs API is mocked; no live jobs are changed).
 
+## Creating jobs
+
+`create_job` requires `title`, `description`, and `experience`. Extract supplied
+information first and ask only for missing mandatory fields. Do not solicit
+optional fields unless the user explicitly wants to provide them.
+
+Optional fields are `city`, `state`, `country`, `skills`, `employment_type`,
+`job_type`, `industry`, `education_level`, `salary_value`, and `salary_currency`.
+Text and skills must be non-blank; salary must be finite and non-negative.
+Currency is normalized to uppercase and must be a supported ISO 4217 code.
+Unknown fields are rejected.
+
+Optionally configure `DEFAULT_EMPLOYMENT_TYPE` (for example `Full-time`),
+`DEFAULT_JOB_TYPE` (for example `On-site`), and `DEFAULT_SALARY_CURRENCY`
+(for example `USD`) in the server environment. Defaults are validated when a
+session initializes, apply only to omitted fields, and appear in the preview.
+Without configuration, optional fields remain absent; explicit inputs override
+defaults. No location or currency is inferred from the user's language.
+
+Clients with form elicitation receive the complete validated preview in a native
+confirmation dialog. Only explicit acceptance with `confirm: true` sends
+`POST /jobs`. Other clients receive `status: "confirmation_required"`, the `job`
+preview, and a `confirmation_id`, without creating anything. Show the entire
+preview and wait for a subsequent user reply before calling
+`confirm_job_creation` with that ID and a boolean `confirm`.
+The initial request to create a job is not approval.
+
+Confirmations are session-bound and single-use. A new preview replaces the
+previous pending creation. Declining, submitting (even if the API fails), or
+ending the session consumes the confirmation. Requested edits require a fresh
+preview and approval. Chat confirmation relies on the assistant honoring the
+user's reply; the server cannot independently verify chat approval.
+Successful creation returns `job_id` and the API's `job` details. An invalid or
+unverifiable API response is an error; check existing jobs before retrying to
+avoid duplicates. Reconnect existing clients after deployment to discover
+`confirm_job_creation`.
+
 ## Updating jobs
 
 Use `search_jobs` or `get_job_details` to identify the exact job slug, then call
