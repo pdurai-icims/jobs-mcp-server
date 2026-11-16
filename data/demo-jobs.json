@@ -1,0 +1,7 @@
+{
+  "jobs": [
+    { "slug": "demo-react-developer", "req_id": "DEMO-001", "title": "React Developer", "description": "Synthetic hackathon posting: build accessible React interfaces and collaborate on frontend features.", "experience": "2-4 years", "city": "Chennai", "country": "India", "skills": ["React", "JavaScript", "CSS"], "employment_type": "Full-time", "job_type": "Hybrid" },
+    { "slug": "demo-backend-developer", "req_id": "DEMO-002", "title": "Backend Developer", "description": "Synthetic hackathon posting: implement Node.js APIs and PostgreSQL queries with automated tests.", "experience": "3-5 years", "city": "Bengaluru", "country": "India", "skills": ["Node.js", "PostgreSQL", "Docker"], "employment_type": "Full-time", "job_type": "Remote" },
+    { "slug": "demo-data-analyst", "req_id": "DEMO-003", "title": "Data Analyst", "description": "Synthetic hackathon posting: explore datasets with SQL and Python and communicate findings clearly.", "experience": "0-2 years", "city": "Hyderabad", "country": "India", "skills": ["SQL", "Python", "Excel"], "employment_type": "Full-time", "job_type": "On-site" }
+  ]
+}

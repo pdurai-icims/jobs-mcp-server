@@ -2,257 +2,115 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { getAuthenticatedUser } from "./middleware/auth.js";
+import { createAuthenticator } from "./middleware/auth.js";
 import { createMcpHandler } from "./middleware/mcp.js";
 import { registerUpdateJob } from "./update-job.js";
 import { registerCreateJob } from "./create-job.js";
+import { toolResult, toolError } from "./tool-result.js";
+import { readConfig } from "./config.js";
+import { createPool, migrate } from "./db/index.js";
+import { createJobRepository } from "./db/jobs.js";
 
-const app = express();
-app.use(express.json());
-
-// ── Create MCP server ──
-export function createJobsServer() {
-const server = new McpServer({
-    name: "jobs-mcp",
-    version: "1.0.0"
-});
-
-// ── Define your jobs tool ──
-server.tool(
-    "search_jobs",
-
-    `Search for job postings based on the user's requirements.
-
-Use this tool whenever the user wants to find jobs.
-
-Examples:
-- "Find React developer jobs"
-- "Show senior Java jobs in Seattle"
-- "Find jobs in Chennai"
-- "Find jobs requiring SQL"
-- "Show developer jobs in New York"
-
-The tool searches the available job postings and returns matching results.`,
-
-    {
-        query: z.string().optional().describe(
-            "Job title, skill, technology, role, or keyword to search for. Example: React developer"
-        ),
-
-        location: z.string().optional().describe(
-            "City, state, or country where the job is located. Example: Seattle"
-        ),
-
-        limit: z.number()
-            .int()
-            .min(1)
-            .max(20)
-            .optional()
-            .default(5)
-            .describe(
-                "Maximum number of jobs to return. Default is 5."
-            )
-    },
-
-    async ({ query, location, limit = 5 }) => {
+export function createJobsServer({ jobs, subject }) {
+    const server = new McpServer({ name: "jobs-mcp", version: "2.0.0" });
+    server.registerTool("search_jobs", {
+        description: "Search the shared demo job board by title, description, skills or location. All connector users see the same jobs. Only searchable jobs appear in results.",
+        inputSchema: {
+            query: z.string().optional(), location: z.string().optional(),
+            limit: z.number().int().min(1).max(20).default(5)
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false }
+    }, async input => {
+        try { return toolResult(await jobs.search(input)); }
+        catch (error) { return toolError("search jobs", error); }
+    });
+    server.registerTool("get_job_details", {
+        description: "Get a job directly by UUID, exact slug, req_id or imported legacy ID, including jobs hidden from search.",
+        inputSchema: { job_id: z.string().trim().min(1) },
+        annotations: { readOnlyHint: true, openWorldHint: false }
+    }, async ({ job_id }) => {
         try {
-            // Fetch jobs from staging API
-            const params = new URLSearchParams();
-            params.set("offset", "0");
-            params.set("limit", String(limit));
-            if (query && query.trim()) {
-                params.set("q", query);
-            }
-            if (location && location.trim()) {
-                params.set("location", location);
-            }
-
-            const res = await fetch(
-                `https://jobs-api-9203.onrender.com/jobs?${params}`,
-                {
-                    headers: {
-                        "Content-Type": "application/json",
-                    }
-                }
-            );
-
-            if (!res.ok) {
-                const errorText = await res.text();
-                console.error(
-                    `Jobs API returned ${res.status}:`,
-                    errorText
-                );
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Unable to search jobs. Jobs API returned HTTP ${res.status}.`
-                        }
-                    ]
-                };
-            }
-
-            const data = await res.json();
-            let jobs = data.jobs || [];
-
-            // Filter by query keyword in title or description if provided
-            if (query) {
-                const q = query.toLowerCase();
-                jobs = jobs.filter(j =>
-                    (j.title && j.title.toLowerCase().includes(q)) ||
-                    (j.description && j.description.toLowerCase().includes(q)) ||
-                    (j.skills && j.skills.toLowerCase().includes(q))
-                );
-            }
-
-            // Filter by location if provided
-            if (location) {
-                const loc = location.toLowerCase();
-                jobs = jobs.filter(j =>
-                    (j.city && j.city.toLowerCase().includes(loc)) ||
-                    (j.state && j.state.toLowerCase().includes(loc)) ||
-                    (j.country && j.country.toLowerCase().includes(loc)) ||
-                    (j.location_type && j.location_type.toLowerCase().includes(loc))
-                );
-            }
-
-            // Slice to requested limit
-            const results = jobs.slice(0, limit);
-
-            // Return result to Claude — Claude will format it for the user
-            return {
-                content: [{
-                    type: "text",
-                    text: JSON.stringify({ count: results.length, total_found: jobs.length, jobs: results }, null, 2)
-                }]
-            };
-        } catch (err) {
-            return {
-                content: [{
-                    type: "text",
-                    text: `Jobs API is currently unreachable or down. Details: ${err.message}${err.cause ? ` (${err.cause.message || err.cause})` : ""}`
-                }]
-            };
-        }
-    }
-);
-
-
-registerCreateJob(server);
-
-// ── Tool 2: Get job details ──
-server.tool(
-    "get_job_details",
-    "Get full details of a specific job listing by slug or req_id.",
-    { job_id: z.string().describe("The job listing slug or req_id") },
-    async ({ job_id }) => {
-        try {
-            const res = await fetch(
-                `https://jobs-api-9203.onrender.com/jobs`,
-                {
-                    headers: {
-                        "Content-Type": "application/json",
-                    }
-                }
-            );
-
-            if (!res.ok) {
-                return {
-                    content: [{ type: "text", text: `Error fetching job details: ${res.statusText}` }]
-                };
-            }
-
-            const data = await res.json();
-            const job = (data.jobs || []).find(j => j.slug === job_id || j.req_id === job_id);
-
-            if (!job) {
-                return {
-                    content: [{ type: "text", text: `Job not found with ID/slug: ${job_id}` }]
-                };
-            }
-
-            return { content: [{ type: "text", text: JSON.stringify(job, null, 2) }] };
-        } catch (err) {
-            return {
-                content: [{
-                    type: "text",
-                    text: `Jobs API is currently unreachable or down. Details: ${err.message}${err.cause ? ` (${err.cause.message || err.cause})` : ""}`
-                }]
-            };
-        }
-    }
-);
-
-// ── MCP HTTP endpoint ──
-registerUpdateJob(server);
-return server;
+            const job = await jobs.get(job_id);
+            return job ? toolResult(job) : toolResult("Job not found with that ID or slug.", true);
+        } catch (error) { return toolError("fetch job details", error); }
+    });
+    registerCreateJob(server, jobs, subject);
+    registerUpdateJob(server, jobs, subject);
+    return server;
 }
 
-// Claude.ai connects to this URL
-const mcpHandler = createMcpHandler(createJobsServer, getAuthenticatedUser);
-app.post("/mcp", mcpHandler);
-app.get("/mcp", mcpHandler);
-app.delete("/mcp", mcpHandler);
-
-// Health check — useful for deployment platforms
-app.get("/", (req, res) => {
-    res.json({ status: "ok", name: "Jobs MCP Server" });
-});
-
-app.get("/.well-known/oauth-protected-resource", (req, res) => {
-    res.json({
-        resource: "https://jobs-mcp-server.onrender.com/mcp",
-        authorization_servers: [
-            "https://jobs-mcp-server.onrender.com"  // ← your server, not Auth0
-        ],
+export function createApp({ jobs, config, authenticate = createAuthenticator(config), checkDatabase = async () => {} }) {
+    const app = express();
+    app.disable("x-powered-by");
+    app.use(express.json({ limit: "128kb" }));
+    const handler = createMcpHandler(user => createJobsServer({ jobs, subject: user.sub }), authenticate, {
+        publicBaseUrl: config.PUBLIC_BASE_URL, sessionTtlMs: config.SESSION_TTL_MS, maxSessions: config.MAX_SESSIONS
+    });
+    for (const method of ["post", "get", "delete"]) app[method]("/mcp", handler);
+    app.all("/mcp", (_req, res) => res.set("Allow", "POST, GET, DELETE").sendStatus(405));
+    app.get("/", (_req, res) => res.json({ status: "ok", name: "Jobs MCP Server", mode: "shared-demo" }));
+    app.get("/health/ready", async (_req, res) => {
+        try { await checkDatabase(); res.json({ status: "ok" }); }
+        catch { res.status(503).json({ status: "database_unavailable" }); }
+    });
+    const resourceMetadata = (_req, res) => res.set("Cache-Control", "no-store").json({
+        resource: `${config.PUBLIC_BASE_URL}/mcp`,
+        // Auth0 owns discovery, authorization responses and tokens. Preserve its exact issuer.
+        authorization_servers: [config.AUTH0_ISSUER],
         bearer_methods_supported: ["header"]
     });
-});
-
-app.get("/.well-known/oauth-authorization-server", (req, res) => {
-    res.json({
-        issuer: "https://jobs-mcp-server.onrender.com",  // ← your server
-        authorization_endpoint: "https://dev-duromcyrubs02o5n.us.auth0.com/authorize",
-        token_endpoint: "https://jobs-mcp-server.onrender.com/token",  // ← your proxy
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        code_challenge_methods_supported: ["S256"]
+    app.get("/.well-known/oauth-protected-resource", resourceMetadata);
+    app.get("/.well-known/oauth-protected-resource/mcp", resourceMetadata);
+    // This is an OAuth resource server, not an authorization server. Clients
+    // discover Auth0 from protected-resource metadata and exchange tokens there.
+    // Do not proxy OAuth or advertise a tunnel issuer for Auth0-issued responses.
+    app.use((error, _req, res, _next) => {
+        const status = error.type === "entity.too.large" ? 413 : error.type === "entity.parse.failed" ? 400 : 500;
+        res.status(status).json({ error: status === 500 ? "server_error" : "invalid_request" });
     });
-});
+    return { app, close: handler.close };
+}
 
-app.post("/token", express.urlencoded({ extended: true }), async (req, res) => {
+async function main() {
+    const config = readConfig();
+    const pool = createPool();
     try {
-        console.log("Token proxy received:", req.body); // ← debug log
-
-        const body = new URLSearchParams({
-            ...req.body,
-            client_id: process.env.AUTH0_CLIENT_ID,
-            client_secret: process.env.AUTH0_CLIENT_SECRET,
-            audience: "https://jobs-mcp-server.onrender.com/mcp"
+        await migrate(pool);
+        const { app, close } = createApp({
+            jobs: createJobRepository(pool), config,
+            checkDatabase: () => pool.query("SELECT 1")
         });
-
-        const response = await fetch(
-            "https://dev-duromcyrubs02o5n.us.auth0.com/oauth/token",
-            {
-                method: "POST",
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                body: body.toString()
-            }
-        );
-
-        const data = await response.json();
-        console.log("Auth0 token response:", response.status, data); // ← debug log
-
-        res.status(response.status).json(data);
-    } catch (err) {
-        console.error("Token proxy error:", err);
-        res.status(500).json({ error: "token_proxy_error", message: err.message });
+        let listener;
+        try {
+            await new Promise((resolve, reject) => {
+                listener = app.listen(config.PORT, "0.0.0.0", error => error ? reject(error) : resolve());
+            });
+        } catch (error) {
+            await close();
+            throw error;
+        }
+        console.log(`Jobs MCP server listening on port ${config.PORT}`);
+        let stopping = false;
+        async function shutdown() {
+            if (stopping) return;
+            stopping = true;
+            const deadline = setTimeout(() => process.exit(1), 10_000).unref();
+            const stopped = new Promise(resolve => listener.close(resolve));
+            await close();
+            await stopped;
+            await pool.end();
+            clearTimeout(deadline);
+        }
+        process.once("SIGTERM", shutdown);
+        process.once("SIGINT", shutdown);
+    } catch (error) {
+        await pool.end();
+        throw error;
     }
-});
-
-const PORT = process.env.PORT || 3000;
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-    app.listen(PORT, () => {
-        console.log(`MCP server running on port ${PORT}`);
+    main().catch(error => {
+        console.error("Startup failed:", error.code ?? error.message);
+        process.exitCode = 1;
     });
 }

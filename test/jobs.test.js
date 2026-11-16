@@ -1,556 +1,254 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { after, before, test } from "node:test";
-import express from "express";
+import { after, before, beforeEach, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createJobsServer } from "../server.js";
-import { createMcpHandler } from "../middleware/mcp.js";
+import { createApp } from "../server.js";
+import { readConfig } from "../config.js";
+import { createJobRepository } from "../db/jobs.js";
+import { testDatabase } from "./helpers/database.js";
 
-const originalFetch = globalThis.fetch;
-let listener;
-let endpoint;
-
+let database, jobs, listener, endpoint, close;
+const newJob = { title: "Developer", description: "Build applications", experience: "3 years", skills: ["React"] };
+const config = readConfig({
+    PUBLIC_BASE_URL: "https://demo.example.com",
+    AUTH0_ISSUER: "https://auth.example.com/",
+    AUTH0_AUDIENCE: "jobs-demo",
+    AUTH0_CLIENT_ID: "demo-client",
+    AUTH0_CLIENT_SECRET: "test-only-secret"
+});
 before(async () => {
-    const app = express();
-    app.use(express.json());
-    const handler = createMcpHandler(createJobsServer, async req => {
+    database = await testDatabase();
+    jobs = createJobRepository(database.pool);
+    const service = createApp({ jobs, config, authenticate: async req => {
         const subject = req.headers["x-test-user"];
         return subject ? { sub: subject } : null;
-    });
-    app.post("/mcp", handler);
-    app.get("/mcp", handler);
-    app.delete("/mcp", handler);
-    await new Promise(resolve => {
-        listener = app.listen(0, "127.0.0.1", resolve);
-    });
+    } });
+    close = service.close;
+    await new Promise((resolve, reject) => { listener = service.app.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()); });
     endpoint = new URL(`http://127.0.0.1:${listener.address().port}/mcp`);
 });
-
 after(async () => {
-    await new Promise((resolve, reject) => {
-        listener.close(error => error ? reject(error) : resolve());
-        listener.closeAllConnections();
-    });
+    await close?.();
+    if (listener) await new Promise(resolve => { listener.close(resolve); listener.closeAllConnections(); });
+    await database?.close();
 });
+beforeEach(async () => { await database.pool.query("DELETE FROM jobs"); });
 
-async function connect(t, confirm, subject = "user-one") {
-    const client = new Client(
-        { name: "jobs-test", version: "1.0.0" },
-        { capabilities: confirm ? { elicitation: { form: {} } } : {} }
-    );
-    if (confirm) {
-        client.setRequestHandler(ElicitRequestSchema, confirm);
-    }
-    const transport = new StreamableHTTPClientTransport(endpoint, {
-        requestInit: { headers: { "x-test-user": subject } }
-    });
+async function connect(t, subject = "alice", dialog) {
+    const client = new Client({ name: "jobs-test", version: "1.0.0" }, { capabilities: dialog ? { elicitation: { form: {} } } : {} });
+    if (dialog) client.setRequestHandler(ElicitRequestSchema, dialog);
+    const transport = new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: { "x-test-user": subject } } });
     await client.connect(transport);
-    t.after(async () => {
-        await transport.terminateSession();
-        await client.close();
-    });
+    t.after(async () => { await transport.terminateSession().catch(() => {}); await client.close(); });
     return { client, transport };
 }
+const call = (client, name, args) => client.callTool({ name, arguments: args });
+const parse = response => JSON.parse(response.content[0].text);
+const create = (client, job = newJob) => call(client, "create_job", job);
+const confirmCreate = (client, id, confirm = true) => call(client, "confirm_job_creation", { confirmation_id: id, confirm });
+const update = (client, slug, updates = { title: "Senior Developer" }) => call(client, "update_job", { slug, updates });
+const confirmUpdate = (client, id, confirm = true) => call(client, "confirm_job_update", { confirmation_id: id, confirm });
 
-function mockJobsApi(t, respond = () => Response.json({ success: true, job: { slug: "developer" } })) {
-    const calls = [];
-    t.mock.method(globalThis, "fetch", async (input, init) => {
-        const url = new URL(input instanceof Request ? input.url : input);
-        if (url.origin === endpoint.origin) {
-            return originalFetch(input, init);
-        }
-        assert.equal(url.origin, "https://jobs-api-9203.onrender.com");
-        calls.push({ url: url.href, ...init });
-        return respond(input, init);
-    });
-    return calls;
-}
-
-const approve = () => ({ action: "accept", content: { confirm: true } });
-const update = (client, updates = { title: "Senior Developer" }, slug = "developer") =>
-    client.callTool({ name: "update_job", arguments: { slug, updates } });
-const confirmUpdate = (client, confirmation_id, confirm = true) =>
-    client.callTool({ name: "confirm_job_update", arguments: { confirmation_id, confirm } });
-
-const newJob = { title: "Developer", description: "Build applications", experience: "3 years" };
-const create = (client, job = newJob) =>
-    client.callTool({ name: "create_job", arguments: job });
-const confirmCreation = (client, confirmation_id, confirm = true) =>
-    client.callTool({ name: "confirm_job_creation", arguments: { confirmation_id, confirm } });
-const createdResponse = () => Response.json({ success: true, job: { id: 42, ...newJob } });
-
-test("creation previews every supplied field and waits for explicit dialog approval", { timeout: 15000 }, async t => {
-    const calls = mockJobsApi(t, createdResponse);
-    let approveDialog;
-    let dialogShown;
-    const shown = new Promise(resolve => { dialogShown = resolve; });
-    const job = {
-        ...newJob, city: "Chennai", state: "Tamil Nadu", country: "India",
-        skills: ["React"], employment_type: "Full-time", job_type: "Hybrid",
-        industry: "Software", education_level: "Degree", salary_value: 0, salary_currency: "INR"
-    };
-    const { client } = await connect(t, request => {
-        assert.deepEqual(JSON.parse(request.params.message.split("\n").slice(1).join("\n")), job);
-        assert.equal(request.params.requestedSchema.properties.confirm.default, false);
-        dialogShown();
-        return new Promise(resolve => { approveDialog = resolve; });
-    });
-    const pending = create(client, job);
-    await shown;
-    assert.equal(calls.length, 0);
-    approveDialog(approve());
-    const result = await pending;
-    assert.equal(result.isError, false);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].method, "POST");
-    assert.equal(calls[0].url, "https://jobs-api-9203.onrender.com/jobs");
-    assert.deepEqual(JSON.parse(calls[0].body), job);
-    const data = JSON.parse(result.content[0].text);
-    assert.equal(data.job_id, 42);
-    assert.deepEqual(data.job, { id: 42, ...newJob });
+// Creation intentionally uses the same two-tool chat flow for all clients.
+test("creation previews all supplied fields and only saves after separate approval", async t => {
+    const { client } = await connect(t, "alice", () => assert.fail("Creation must use the chat preview"));
+    const input = { ...newJob, city: "Chennai", state: "Tamil Nadu", country: "India", employment_type: "Full-time", job_type: "Hybrid", industry: "Software", education_level: "Degree", salary_value: 0, salary_currency: "inr" };
+    const preview = parse(await create(client, input));
+    assert.deepEqual(preview.job, { ...input, salary_currency: "INR" });
+    assert.equal(preview.status, "confirmation_required");
+    assert.equal((await jobs.search()).count, 0);
+    const created = parse(await confirmCreate(client, preview.confirmation_id));
+    assert.equal(created.success, true);
+    assert.equal((await jobs.get(created.job_id)).title, input.title);
+    assert.equal((await confirmCreate(client, preview.confirmation_id)).isError, true);
+    const row = (await database.pool.query("SELECT created_by FROM jobs")).rows[0];
+    assert.equal(row.created_by, "alice");
 });
 
-for (const confirmation of [
-    { action: "decline" }, { action: "cancel" },
-    { action: "accept", content: { confirm: false } },
-    { action: "accept", content: {} },
-    { action: "accept", content: { confirm: "true" } }
-]) {
-    test(`does not create for ${JSON.stringify(confirmation)}`, async t => {
-        const calls = mockJobsApi(t, createdResponse);
-        const { client } = await connect(t, () => confirmation);
-        const result = await create(client);
-        assert.equal(calls.length, 0);
-        assert.match(result.content[0].text, /cancelled|Unable to complete/);
-    });
-}
-
-test("creation chat previews are session-bound, immutable, replaceable, and single-use", async t => {
-    const calls = mockJobsApi(t, createdResponse);
+test("creation previews are replaceable, session-bound, immutable and cancellable", async t => {
     const { client } = await connect(t);
-    const other = await connect(t);
-    const old = JSON.parse((await create(client)).content[0].text);
-    const preview = JSON.parse((await create(client, { ...newJob, title: "Senior Developer" })).content[0].text);
-    assert.equal(preview.status, "confirmation_required");
-    assert.match(preview.message, /STOP until the user replies/);
-    assert.equal(calls.length, 0);
-    assert.equal((await confirmCreation(client, old.confirmation_id)).isError, true);
-    assert.equal((await confirmCreation(other.client, preview.confirmation_id)).isError, true);
+    const other = await connect(t, "bob");
+    const old = parse(await create(client));
+    const preview = parse(await create(client, { ...newJob, title: "New title" }));
+    assert.equal((await confirmCreate(client, old.confirmation_id)).isError, true);
+    assert.equal((await confirmCreate(other.client, preview.confirmation_id)).isError, true);
     for (const args of [
         { confirmation_id: preview.confirmation_id },
         { confirmation_id: preview.confirmation_id, confirm: "true" },
         { confirmation_id: preview.confirmation_id, confirm: true, job: newJob }
-    ]) {
-        assert.equal((await client.callTool({ name: "confirm_job_creation", arguments: args })).isError, true);
-    }
-    assert.equal(calls.length, 0);
-    assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, false);
-    assert.deepEqual(JSON.parse(calls[0].body), preview.job);
-    assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, true);
-    assert.equal(calls.length, 1);
-    const cancelled = JSON.parse((await create(client)).content[0].text);
-    assert.match((await confirmCreation(client, cancelled.confirmation_id, false)).content[0].text, /cancelled/);
-    assert.equal((await confirmCreation(client, cancelled.confirmation_id)).isError, true);
-    assert.equal(calls.length, 1);
+    ]) assert.equal((await call(client, "confirm_job_creation", args)).isError, true);
+    assert.match((await confirmCreate(client, preview.confirmation_id, false)).content[0].text, /cancelled/);
+    assert.equal((await confirmCreate(client, preview.confirmation_id)).isError, true);
+    assert.equal((await jobs.search()).count, 0);
 });
 
-test("creation validates required and optional values before presenting a preview", async t => {
-    const calls = mockJobsApi(t, createdResponse);
-    const { client } = await connect(t, () => assert.fail("Invalid inputs must not show a dialog"));
-    for (const field of ["title", "description", "experience"]) {
-        const job = { ...newJob };
-        delete job[field];
-        assert.equal((await create(client, job)).isError, true);
+test("creation requests a generated description and rejects invalid values", async t => {
+    const { client } = await connect(t);
+    const result = await create(client, { title: "Developer", experience: "3 years" });
+    assert.equal(result.isError, true);
+    assert.equal(parse(result).status, "description_required");
+    for (const input of [{ title: " " }, { experience: "" }, { skills: "React" }, { city: " " }, { salary_value: -1 }, { salary_currency: "XYZ" }, { unknown: true }]) {
+        assert.equal((await create(client, { ...newJob, ...input })).isError, true);
     }
-    for (const invalid of [
-        { title: " " }, { description: "" }, { experience: " " },
-        { city: " " }, { state: 1 }, { country: null }, { skills: [" "] },
-        { skills: "React" }, { employment_type: "" }, { job_type: " " },
-        { industry: "" }, { education_level: "" }, { salary_value: -1 },
-        { salary_value: "100" }, { salary_currency: "XYZ" }, { salary_currency: "US" },
-        { unknown: true }
-    ]) {
-        assert.equal((await create(client, { ...newJob, ...invalid })).isError, true);
-    }
-    assert.equal(calls.length, 0);
+    assert.equal((await jobs.search()).count, 0);
 });
 
-test("configured creation defaults appear in previews and explicit values override them", async t => {
-    const settings = {
-        DEFAULT_EMPLOYMENT_TYPE: "Full-time",
-        DEFAULT_JOB_TYPE: "On-site",
-        DEFAULT_SALARY_CURRENCY: "usd"
-    };
-    for (const [key, value] of Object.entries(settings)) {
+test("creation defaults appear in the preview and explicit values override them", async t => {
+    for (const [key, value] of Object.entries({ DEFAULT_EMPLOYMENT_TYPE: "Full-time", DEFAULT_JOB_TYPE: "On-site", DEFAULT_SALARY_CURRENCY: "usd" })) {
         const previous = process.env[key];
-        t.after(() => {
-            if (previous === undefined) delete process.env[key];
-            else process.env[key] = previous;
-        });
         process.env[key] = value;
+        t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
     }
-    const calls = mockJobsApi(t, createdResponse);
     const { client } = await connect(t);
-    const { tools } = await client.listTools();
-    const schema = tools.find(tool => tool.name === "create_job").inputSchema;
-    assert.deepEqual(schema.required, ["title", "description", "experience"]);
-    assert.equal(schema.properties.employment_type.default, "Full-time");
-    assert.equal(schema.properties.job_type.default, "On-site");
-    assert.equal(schema.properties.salary_currency.default, "USD");
-    const preview = JSON.parse((await create(client)).content[0].text);
-    assert.deepEqual(preview.job, {
-        ...newJob, employment_type: "Full-time", job_type: "On-site", salary_currency: "USD"
-    });
-    const explicit = JSON.parse((await create(client, {
-        ...newJob, title: " Developer ", employment_type: "Contract", job_type: "Remote", salary_currency: "inr"
-    })).content[0].text);
-    assert.deepEqual(explicit.job, {
-        ...newJob, employment_type: "Contract", job_type: "Remote", salary_currency: "INR"
-    });
-    assert.equal((await confirmCreation(client, explicit.confirmation_id)).isError, false);
-    assert.deepEqual(JSON.parse(calls[0].body), explicit.job);
+    const preview = parse(await create(client));
+    assert.equal(preview.job.salary_currency, "USD");
+    assert.equal(preview.job.employment_type, "Full-time");
+    const explicit = parse(await create(client, { ...newJob, salary_currency: "inr", job_type: "Remote" }));
+    assert.equal(explicit.job.salary_currency, "INR");
+    assert.equal(explicit.job.job_type, "Remote");
 });
 
-test("unconfigured optional creation fields remain omitted and invalid defaults fail explicitly", async t => {
-    for (const key of ["DEFAULT_EMPLOYMENT_TYPE", "DEFAULT_JOB_TYPE", "DEFAULT_SALARY_CURRENCY"]) {
-        const previous = process.env[key];
-        t.after(() => {
-            if (previous === undefined) delete process.env[key];
-            else process.env[key] = previous;
-        });
-        delete process.env[key];
-    }
-    const calls = mockJobsApi(t, createdResponse);
-    const { client } = await connect(t);
-    assert.deepEqual(JSON.parse((await create(client)).content[0].text).job, newJob);
-    assert.equal(calls.length, 0);
-    process.env.DEFAULT_SALARY_CURRENCY = "INVALID";
-    assert.throws(() => createJobsServer(), /currency|format/i);
+test("two users share search results and may edit each other's jobs", async t => {
+    const first = await connect(t, "alice");
+    const second = await connect(t, "bob");
+    const preview = parse(await create(first.client));
+    const created = parse(await confirmCreate(first.client, preview.confirmation_id));
+    const found = parse(await call(second.client, "search_jobs", { query: "react" }));
+    assert.equal(found.jobs[0].id, created.job_id);
+    const edit = parse(await update(second.client, created.job.slug, { city: "Bengaluru" }));
+    assert.equal((await jobs.get(created.job_id)).city, null);
+    assert.equal((await confirmUpdate(second.client, edit.confirmation_id)).isError, false);
+    assert.equal(parse(await call(first.client, "get_job_details", { job_id: created.job_id })).city, "Bengaluru");
+    assert.equal((await database.pool.query("SELECT updated_by FROM jobs")).rows[0].updated_by, "bob");
 });
 
-for (const [name, respond] of [
-    ["HTTP failure", () => new Response("Unavailable", { status: 503 })],
-    ["network failure", () => { throw new Error("Connection lost"); }],
-    ["invalid JSON", () => new Response("not JSON")],
-    ["missing ID", () => Response.json({ success: true, job: newJob })],
-    ["empty ID", () => Response.json({ job: { id: " " } })],
-    ["explicit failure", () => Response.json({ success: false, job: { id: 42 } })]
-]) {
-    test(`creation surfaces ${name} and consumes confirmation`, async t => {
-        const calls = mockJobsApi(t, respond);
-        const { client } = await connect(t);
-        const preview = JSON.parse((await create(client)).content[0].text);
-        const result = await confirmCreation(client, preview.confirmation_id);
-        assert.equal(result.isError, true);
-        assert.match(result.content[0].text, /Check existing jobs before retrying/);
-        assert.equal((await confirmCreation(client, preview.confirmation_id)).isError, true);
-        assert.equal(calls.length, 1);
-    });
-}
-
-test("update waits for explicit approval and PATCHes only the displayed changes", { timeout: 15000 }, async t => {
-    const calls = mockJobsApi(t);
-    let approveDialog;
-    let dialogShown;
-    const shown = new Promise(resolve => { dialogShown = resolve; });
-    const updates = {
-        title: "Senior Developer", city: null, salary_value: 0,
-        skills: [], searchable: false, applyable: true
-    };
-    const { client } = await connect(t, request => {
-        assert.equal(request.params.mode, "form");
-        assert.match(request.params.message, /developer\/special\?id=1/);
-        assert.deepEqual(JSON.parse(request.params.message.slice(request.params.message.indexOf("\n") + 1)), updates);
+test("update native dialog displays exact changes and waits for explicit acceptance", { timeout: 15000 }, async t => {
+    const job = await jobs.create(newJob, "alice");
+    let finish;
+    let shown;
+    const dialogShown = new Promise(resolve => { shown = resolve; });
+    const changes = { title: "Senior Developer", city: null, skills: [], salary_value: 0 };
+    const { client } = await connect(t, "bob", request => {
+        assert.deepEqual(JSON.parse(request.params.message.split("\n").slice(1).join("\n")), changes);
         assert.equal(request.params.requestedSchema.properties.confirm.default, false);
-        assert.deepEqual(request.params.requestedSchema.required, ["confirm"]);
-        dialogShown();
-        return new Promise(resolve => { approveDialog = resolve; });
+        shown();
+        return new Promise(resolve => { finish = resolve; });
     });
-    const pending = update(client, updates, "developer/special?id=1");
-    await shown;
-    assert.equal(calls.length, 0);
-    approveDialog(approve());
-    const result = await pending;
-    assert.equal(result.isError, false);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://jobs-api-9203.onrender.com/jobs/developer%2Fspecial%3Fid%3D1");
-    assert.equal(calls[0].method, "PATCH");
-    assert.deepEqual(JSON.parse(calls[0].body), updates);
-    assert.equal(JSON.parse(result.content[0].text).success, true);
-});
-
-for (const confirmation of [
-    { action: "decline" },
-    { action: "cancel" },
-    { action: "accept", content: { confirm: false } },
-    { action: "accept" },
-    { action: "accept", content: {} },
-    { action: "accept", content: { confirm: "true" } }
-]) {
-    test(`does not update for ${JSON.stringify(confirmation)}`, async t => {
-        const calls = mockJobsApi(t);
-        const { client } = await connect(t, () => confirmation);
-        const result = await update(client);
-        assert.equal(calls.length, 0);
-        assert.match(result.content[0].text, /cancelled|Unable to complete/);
-    });
-}
-
-test("clients without dialogs preview changes, then apply only after separate confirmation", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t);
-    const updates = { title: "Senior Developer", salary_value: null, skills: [], searchable: false };
-    const result = await update(client, updates, "developer/special?id=1");
-    assert.equal(result.isError, false);
-    const preview = JSON.parse(result.content[0].text);
-    assert.equal(preview.status, "confirmation_required");
-    assert.equal(preview.slug, "developer/special?id=1");
-    assert.deepEqual(preview.updates, updates);
-    assert.match(preview.message, /STOP until the user replies/);
-    assert.equal(calls.length, 0);
-
-    const confirmed = await confirmUpdate(client, preview.confirmation_id);
-    assert.equal(confirmed.isError, false);
-    assert.equal(JSON.parse(confirmed.content[0].text).success, true);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://jobs-api-9203.onrender.com/jobs/developer%2Fspecial%3Fid%3D1");
-    assert.equal(calls[0].method, "PATCH");
-    assert.deepEqual(JSON.parse(calls[0].body), updates);
-    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
-    assert.equal(calls.length, 1);
-});
-
-test("chat cancellation consumes the confirmation without updating", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t);
-    const preview = JSON.parse((await update(client)).content[0].text);
-    const cancelled = await confirmUpdate(client, preview.confirmation_id, false);
-    assert.match(cancelled.content[0].text, /cancelled/);
-    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
-    assert.equal(calls.length, 0);
-});
-
-test("chat confirmation requires a valid preview and explicit boolean without replacement fields", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t);
-    assert.equal((await confirmUpdate(client, randomUUID())).isError, true);
-    const preview = JSON.parse((await update(client)).content[0].text);
-    for (const args of [
-        { confirmation_id: preview.confirmation_id },
-        { confirmation_id: preview.confirmation_id, confirm: "true" },
-        { confirmation_id: preview.confirmation_id, confirm: true, slug: "other-job" },
-        { confirmation_id: preview.confirmation_id, confirm: true, updates: { title: "Changed" } },
-        { confirmation_id: randomUUID(), confirm: true }
-    ]) {
-        const result = await client.callTool({ name: "confirm_job_update", arguments: args });
-        assert.equal(result.isError, true);
-    }
-    assert.equal(calls.length, 0);
-    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, false);
-    assert.deepEqual(JSON.parse(calls[0].body), preview.updates);
-});
-
-test("new previews replace older pending changes", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t);
-    const first = JSON.parse((await update(client, { title: "Old" }, "old-job")).content[0].text);
-    const second = JSON.parse((await update(client, { title: "New" }, "new-job")).content[0].text);
-    assert.notEqual(first.confirmation_id, second.confirmation_id);
-    assert.equal((await confirmUpdate(client, first.confirmation_id)).isError, true);
-    assert.equal(calls.length, 0);
-    assert.equal((await confirmUpdate(client, second.confirmation_id)).isError, false);
-    assert.ok(calls[0].url.endsWith("/new-job"));
-    assert.deepEqual(JSON.parse(calls[0].body), { title: "New" });
-});
-
-test("chat confirmations cannot be used in other sessions, even for the same user", async t => {
-    const calls = mockJobsApi(t);
-    const first = await connect(t);
-    const second = await connect(t);
-    const third = await connect(t, undefined, "user-two");
-    const preview = JSON.parse((await update(first.client)).content[0].text);
-    for (const { client } of [second, third]) {
-        assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
-    }
-    assert.equal(calls.length, 0);
-    assert.equal((await confirmUpdate(first.client, preview.confirmation_id)).isError, false);
-    assert.equal(calls.length, 1);
-});
-
-test("duplicate concurrent chat confirmations send only one PATCH", { timeout: 15000 }, async t => {
-    let finishUpdate;
-    let apiStarted;
-    const started = new Promise(resolve => { apiStarted = resolve; });
-    const calls = mockJobsApi(t, () => {
-        apiStarted();
-        return new Promise(resolve => { finishUpdate = resolve; });
-    });
-    const { client } = await connect(t);
-    const preview = JSON.parse((await update(client)).content[0].text);
-    const pending = confirmUpdate(client, preview.confirmation_id);
-    await started;
-    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
-    finishUpdate(Response.json({ success: true, job: { slug: preview.slug } }));
+    const pending = update(client, job.slug, changes);
+    await dialogShown;
+    assert.equal((await jobs.get(job.id)).version, 1);
+    finish({ action: "accept", content: { confirm: true } });
     assert.equal((await pending).isError, false);
-    assert.equal(calls.length, 1);
+    assert.equal((await jobs.get(job.id)).title, "Senior Developer");
 });
 
-test("failed chat updates report errors and cannot reuse the confirmation", async t => {
-    const calls = mockJobsApi(t, () => new Response("Update failed", { status: 500 }));
-    const { client } = await connect(t);
-    const preview = JSON.parse((await update(client)).content[0].text);
-    const failed = await confirmUpdate(client, preview.confirmation_id);
-    assert.equal(failed.isError, true);
-    assert.match(failed.content[0].text, /HTTP 500/);
-    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, true);
-    assert.equal(calls.length, 1);
-});
-
-test("invalid updates cannot create a chat preview", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t);
-    for (const updates of [{}, { title: " " }, { unknown: true }]) {
-        assert.equal((await update(client, updates)).isError, true);
-    }
-    assert.equal((await confirmUpdate(client, randomUUID())).isError, true);
-    assert.equal(calls.length, 0);
-});
-
-test("invalid updates are rejected before confirmation or API calls", async t => {
-    const calls = mockJobsApi(t);
-    let dialogs = 0;
-    const { client } = await connect(t, () => { dialogs++; return approve(); });
-    for (const updates of [
-        {}, { title: " " }, { description: null }, { unknown: true },
-        { title: "Valid", slug: "other" }, { skills: "Java" },
-        { skills: [1] }, { salary_value: "abc" }, { searchable: "true" },
-        { applyable: null }, { experience: 3 }
-    ]) {
-        const result = await update(client, updates);
-        assert.equal(result.isError, true, JSON.stringify(updates));
-    }
-    for (const slug of [" ", ".", ".."]) {
-        assert.equal((await update(client, { city: "Chennai" }, slug)).isError, true);
-    }
-    assert.equal(dialogs, 0);
-    assert.equal(calls.length, 0);
-});
-
-test("supports every editable API field including nullable values", async t => {
-    const calls = mockJobsApi(t);
-    const { client } = await connect(t, approve);
-    const updates = {
-        title: "Developer", description: "Build software",
-        city: null, state: null, country: null, experience: null,
-        employment_type: null, job_type: null, industry: null,
-        education_level: null, salary_currency: null, salary_value: null,
-        skills: ["Java"], searchable: true, applyable: false
-    };
-    assert.equal((await update(client, updates)).isError, false);
-    assert.deepEqual(JSON.parse(calls[0].body), updates);
-});
-
-for (const status of [400, 404, 500]) {
-    test(`reports API HTTP ${status} without success`, async t => {
-        mockJobsApi(t, () => new Response("Update failed", { status }));
-        const { client } = await connect(t, approve);
-        const result = await update(client);
-        assert.equal(result.isError, true);
-        assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
+for (const answer of [{ action: "decline" }, { action: "cancel" }, { action: "accept", content: { confirm: false } }, { action: "accept", content: {} }, { action: "accept", content: { confirm: "true" } }]) {
+    test(`native update does not write for ${JSON.stringify(answer)}`, async t => {
+        const job = await jobs.create(newJob, "alice");
+        const { client } = await connect(t, "bob", () => answer);
+        await update(client, job.slug);
+        assert.equal((await jobs.get(job.id)).version, 1);
     });
 }
 
-for (const failure of ["network", "invalid JSON", "invalid shape", "dialog"]) {
-    test(`reports ${failure} failures explicitly`, async t => {
-        const calls = mockJobsApi(t, () => {
-            if (failure === "network") throw new Error("Connection unavailable");
-            if (failure === "invalid JSON") return new Response("not json");
-            return Response.json({ success: true });
-        });
-        const { client } = await connect(t, () => {
-            if (failure === "dialog") throw new Error("Dialog unavailable");
-            return approve();
-        });
-        const result = await update(client);
-        assert.equal(result.isError, true);
-        assert.match(result.content[0].text, /Unable to complete or verify/);
-        assert.equal(calls.length, failure === "dialog" ? 0 : 1);
-    });
-}
-
-test("isolates overlapping confirmation dialogs between sessions", { timeout: 15000 }, async t => {
-    const calls = mockJobsApi(t);
-    let finishFirst;
-    let dialogShown;
-    const shown = new Promise(resolve => { dialogShown = resolve; });
-    const first = await connect(t, () => {
-        dialogShown();
-        return new Promise(resolve => { finishFirst = resolve; });
-    });
-    const second = await connect(t, approve, "user-two");
-    const pending = update(first.client, { city: "Chennai" }, "first-job");
-    await shown;
-    assert.equal((await update(second.client, { city: "Seattle" }, "second-job")).isError, false);
-    finishFirst({ action: "decline" });
-    assert.match((await pending).content[0].text, /cancelled/);
-    assert.equal(calls.length, 1);
-    assert.ok(calls[0].url.endsWith("/second-job"));
+test("chat update confirmations are replaceable, isolated and single use", async t => {
+    const job = await jobs.create(newJob, "alice");
+    const { client } = await connect(t);
+    const other = await connect(t); // Even another session for the same user cannot confirm.
+    const old = parse(await update(client, job.slug, { title: "Old" }));
+    const current = parse(await update(client, job.slug, { title: "New" }));
+    assert.equal((await confirmUpdate(client, old.confirmation_id)).isError, true);
+    assert.equal((await confirmUpdate(other.client, current.confirmation_id)).isError, true);
+    assert.equal((await call(client, "confirm_job_update", { confirmation_id: current.confirmation_id, confirm: true, updates: { title: "Injected" } })).isError, true);
+    assert.equal((await confirmUpdate(client, current.confirmation_id)).isError, false);
+    assert.equal((await confirmUpdate(client, current.confirmation_id)).isError, true);
+    assert.equal((await jobs.get(job.id)).title, "New");
+    const cancelled = parse(await update(client, job.slug));
+    await confirmUpdate(client, cancelled.confirmation_id, false);
+    assert.equal((await confirmUpdate(client, cancelled.confirmation_id)).isError, true);
 });
 
-test("authenticates session requests and rejects another user's session access", async t => {
-    mockJobsApi(t);
-    const { client, transport } = await connect(t, approve);
+test("concurrent previews cannot overwrite a newer change", async t => {
+    const job = await jobs.create(newJob, "alice");
+    const first = await connect(t, "alice");
+    const second = await connect(t, "bob");
+    const a = parse(await update(first.client, job.slug, { title: "Alice edit" }));
+    const b = parse(await update(second.client, job.slug, { title: "Bob edit" }));
+    assert.equal((await confirmUpdate(second.client, b.confirmation_id)).isError, false);
+    const stale = await confirmUpdate(first.client, a.confirmation_id);
+    assert.equal(stale.isError, true);
+    assert.match(stale.content[0].text, /changed/);
+    assert.equal((await jobs.get(job.id)).title, "Bob edit");
+});
+
+test("duplicate simultaneous confirmations produce only one database write", async t => {
+    const { client } = await connect(t);
+    const preview = parse(await create(client));
+    const results = await Promise.all([confirmCreate(client, preview.confirmation_id), confirmCreate(client, preview.confirmation_id)]);
+    assert.equal(results.filter(result => !result.isError).length, 1);
+    assert.equal((await jobs.search()).count, 1);
+    const job = (await jobs.search()).jobs[0];
+    const edit = parse(await update(client, job.slug));
+    const updated = await Promise.all([confirmUpdate(client, edit.confirmation_id), confirmUpdate(client, edit.confirmation_id)]);
+    assert.equal(updated.filter(result => !result.isError).length, 1);
+    assert.equal((await jobs.get(job.id)).version, 2);
+});
+
+test("database failure consumes confirmation and never exposes database secrets", async t => {
+    const { client } = await connect(t);
+    const preview = parse(await create(client));
+    const stub = t.mock.method(jobs, "create", async () => { throw new Error("postgres://secret:password@host/db"); });
+    const result = await confirmCreate(client, preview.confirmation_id);
+    assert.equal(result.isError, true);
+    assert.doesNotMatch(result.content[0].text, /secret|password/);
+    stub.mock.restore();
+    assert.equal((await confirmCreate(client, preview.confirmation_id)).isError, true);
+    assert.equal((await jobs.search()).count, 0);
+});
+
+test("creation and update confirmations expire after ten minutes", async t => {
+    const job = await jobs.create(newJob, "alice");
+    const { client } = await connect(t);
+    const creation = parse(await create(client));
+    const edit = parse(await update(client, job.slug));
+    const future = Date.now() + 600001;
+    t.mock.method(Date, "now", () => future);
+    assert.equal((await confirmCreate(client, creation.confirmation_id)).isError, true);
+    assert.equal((await confirmUpdate(client, edit.confirmation_id)).isError, true);
+    assert.equal((await jobs.get(job.id)).version, 1);
+});
+
+test("invalid and nonexistent updates never become applicable previews", async t => {
+    const job = await jobs.create(newJob, "alice");
+    const { client } = await connect(t);
+    for (const changes of [{}, { title: " " }, { description: null }, { unknown: true }, { skills: "Java" }, { salary_value: -1 }, { searchable: "true" }]) {
+        assert.equal((await update(client, job.slug, changes)).isError, true);
+    }
+    assert.equal((await update(client, "missing")).isError, true);
+    assert.equal((await jobs.get(job.id)).version, 1);
+});
+
+test("every MCP request authenticates and another user cannot take over a session", async t => {
+    const { transport } = await connect(t);
     for (const method of ["POST", "GET", "DELETE"]) {
-        for (const [subject, status] of [[null, 401], ["user-two", 404]]) {
-            const headers = {
-                "mcp-session-id": transport.sessionId,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
-            };
+        for (const [subject, expected] of [[null, 401], ["bob", 404]]) {
+            const headers = { "mcp-session-id": transport.sessionId, "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
             if (subject) headers["x-test-user"] = subject;
-            const response = await originalFetch(endpoint, {
-                method, headers,
-                ...(method === "POST" ? { body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" }) } : {})
-            });
-            assert.equal(response.status, status);
+            const response = await fetch(endpoint, { method, headers, ...(method === "POST" ? { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) } : {}) });
+            assert.equal(response.status, expected);
+            if (expected === 401) assert.match(response.headers.get("www-authenticate"), /https:\/\/demo.example.com/);
             await response.text();
         }
     }
-    assert.equal((await update(client)).isError, false);
-    const sessionId = transport.sessionId;
+    const id = transport.sessionId;
     await transport.terminateSession();
-    const response = await originalFetch(endpoint, {
-        headers: { "x-test-user": "user-one", "mcp-session-id": sessionId }
-    });
+    const response = await fetch(endpoint, { headers: { "x-test-user": "alice", "mcp-session-id": id } });
     assert.equal(response.status, 404);
     await response.text();
 });
 
-test("existing search, details and create tools still work", async t => {
-    const job = { id: 42, slug: "developer", req_id: "REQ-1", title: "Developer", description: "Build", city: "Chennai" };
-    const calls = mockJobsApi(t, (_url, init) =>
-        Response.json(init?.method === "POST" ? { job } : { jobs: [job] })
-    );
+test("all six existing tool names remain available", async t => {
     const { client } = await connect(t);
-    const { tools } = await client.listTools();
-    assert.deepEqual(tools.map(tool => tool.name).sort(), [
-        "confirm_job_creation", "confirm_job_update", "create_job", "get_job_details", "search_jobs", "update_job"
-    ]);
-    const search = await client.callTool({
-        name: "search_jobs", arguments: { query: "Developer", location: "Chennai" }
-    });
-    assert.equal(JSON.parse(search.content[0].text).count, 1);
-    const details = await client.callTool({ name: "get_job_details", arguments: { job_id: "REQ-1" } });
-    assert.equal(JSON.parse(details.content[0].text).slug, "developer");
-    const previewResult = await client.callTool({
-        name: "create_job", arguments: { title: "Developer", description: "Build", experience: "3 years" }
-    });
-    const preview = JSON.parse(previewResult.content[0].text);
-    assert.equal(preview.status, "confirmation_required");
-    assert.equal(calls.length, 2);
-    const created = await confirmCreation(client, preview.confirmation_id);
-    assert.equal(JSON.parse(created.content[0].text).success, true);
-    assert.equal(calls.length, 3);
+    assert.deepEqual((await client.listTools()).tools.map(tool => tool.name).sort(), ["confirm_job_creation", "confirm_job_update", "create_job", "get_job_details", "search_jobs", "update_job"]);
 });

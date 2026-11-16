@@ -1,164 +1,81 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { confirmationSchema } from "./create-job.js";
+import { updatesSchema } from "./job-schema.js";
+import { toolResult, toolError } from "./tool-result.js";
 
-const result = (text, isError = false) => ({
-    isError,
-    content: [{ type: "text", text }]
-});
+const TTL = 10 * 60 * 1000;
 
-function updateError(error) {
-    console.error("update_job error:", error);
-    return result(`Unable to complete or verify the job update. Check job details before retrying. Details: ${error.message}`, true);
-}
-
-async function applyUpdate(slug, updates, signal) {
-    try {
-        signal.throwIfAborted();
-        const response = await fetch(
-            `https://jobs-api-9203.onrender.com/jobs/${encodeURIComponent(slug)}`,
-            {
-                method: "PATCH",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json"
-                },
-                body: JSON.stringify(updates),
-                signal
-            }
-        );
-
-        if (!response.ok) {
-            const details = await response.text();
-            console.error("Jobs API update job failed:", response.status, details);
-            return result(`Unable to update job. Jobs API returned HTTP ${response.status}. ${details}`, true);
+export function registerUpdateJob(server, jobs, subject) {
+    let pending;
+    async function apply(preview, signal) {
+        try {
+            signal.throwIfAborted();
+            const job = await jobs.update(preview.slug, preview.updates, subject, preview.version);
+            return toolResult({ success: true, job });
+        } catch (error) {
+            return toolError("complete or verify the job update", error);
         }
-
-        const data = await response.json();
-        if (data?.success !== true || !data.job || typeof data.job !== "object" || Array.isArray(data.job)) {
-            throw new Error("Jobs API returned an invalid update response.");
-        }
-        return result(JSON.stringify({
-            success: true,
-            message: "Job updated successfully",
-            job: data.job
-        }, null, 2));
-    } catch (error) {
-        return updateError(error);
     }
-}
-
-export function registerUpdateJob(server) {
-    let pendingUpdate;
-    const optionalText = z.string().trim().nullable().optional();
-    const updatesSchema = z.object({
-        title: z.string().trim().min(1).optional(),
-        description: z.string().trim().min(1).optional(),
-        city: optionalText,
-        state: optionalText,
-        country: optionalText,
-        experience: optionalText,
-        employment_type: optionalText,
-        job_type: optionalText,
-        industry: optionalText,
-        education_level: optionalText,
-        salary_currency: optionalText,
-        skills: z.array(z.string()).optional(),
-        salary_value: z.number().finite().nullable().optional(),
-        searchable: z.boolean().optional(),
-        applyable: z.boolean().optional()
-    }).strict().refine(
-        updates => Object.values(updates).some(value => value !== undefined),
-        "Provide at least one field to update."
-    );
 
     server.registerTool("update_job", {
-        description: `Update an existing job by its exact slug. Use search_jobs or get_job_details to identify the job first.
-Provide only fields the user wants changed. Null clears optional text or salary; an empty skills array clears skills.
-The tool shows the slug and proposed changes in an interactive MCP confirmation dialog.
-If the client cannot show that dialog, the tool returns a pending preview and confirmation_id without updating.
-Show the entire preview and ask the user to approve it. STOP and wait for a subsequent user reply.
-Only after explicit approval, call confirm_job_update with the confirmation_id and confirm: true.
-If the user declines, call confirm_job_update with confirm: false. If changes are requested, call update_job again for a new preview.
-Never infer approval from the initial update request. A new preview replaces the previous pending preview in this session.`,
-        inputSchema: {
-            slug: z.string().trim().min(1).refine(
-                slug => slug !== "." && slug !== "..",
-                "Provide a job slug, not a path segment."
-            ).describe("Exact slug of the job to update."),
-            updates: updatesSchema.describe("Only the fields to change; omitted fields remain unchanged.")
-        },
-        annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
-            openWorldHint: true
-        }
+        description: `Prepare changes to a shared demo job using its exact slug from search_jobs or get_job_details.
+Send only changed fields. Null clears optional fields; [] clears skills.
+A native confirmation dialog is used if supported. Otherwise show the complete returned preview,
+ask for approval, and STOP until the user replies before calling confirm_job_update.
+Never infer approval from the original request. A new preview replaces the old preview.
+If another user edits the job before confirmation, fetch details and prepare a fresh preview.`,
+        inputSchema: z.object({
+            slug: z.string().trim().min(1).refine(value => value !== "." && value !== ".."),
+            updates: updatesSchema
+        }).strict(),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     }, async ({ slug, updates }, extra) => {
         try {
             extra.signal.throwIfAborted();
-            pendingUpdate = undefined;
+            pending = undefined;
+            const existing = await jobs.getBySlug(slug);
+            if (!existing) return toolResult("Job not found. Search for its exact slug first.", true);
+            const preview = { confirmation_id: randomUUID(), slug, updates, version: existing.version, expiresAt: Date.now() + TTL };
             if (!server.server.getClientCapabilities()?.elicitation?.form) {
-                pendingUpdate = { confirmation_id: randomUUID(), slug, updates };
-                return result(JSON.stringify({
-                    status: "confirmation_required",
-                    ...pendingUpdate,
-                    message: "No changes have been made. Show the job slug and all proposed changes to the user, ask for approval, and STOP until the user replies. Only then call confirm_job_update with this confirmation_id and the user's decision. Do not treat the original update request as confirmation."
-                }, null, 2));
+                pending = preview;
+                return toolResult({
+                    status: "confirmation_required", confirmation_id: preview.confirmation_id,
+                    slug, updates, version: preview.version,
+                    message: "No changes have been made. Show the slug and all changes, ask for approval, and STOP until the user replies. Then call confirm_job_update."
+                });
             }
-
             const confirmation = await server.server.elicitInput({
                 mode: "form",
-                message: `Confirm changes to job "${slug}". Only these fields will change:\n${JSON.stringify(updates, null, 2)}`,
+                message: `Confirm changes to job "${slug}" (version ${preview.version}):\n${JSON.stringify(updates, null, 2)}`,
                 requestedSchema: {
                     type: "object",
-                    properties: {
-                        confirm: {
-                            type: "boolean",
-                            title: "Update this job",
-                            description: "Approve exactly the changes shown above.",
-                            default: false
-                        }
-                    },
+                    properties: { confirm: { type: "boolean", title: "Update this job", default: false } },
                     required: ["confirm"]
                 }
             }, { relatedRequestId: extra.requestId, signal: extra.signal });
-
             if (confirmation.action !== "accept" || confirmation.content?.confirm !== true) {
-                return result("Job update cancelled. No changes were made.");
+                return toolResult("Job update cancelled. No changes were made.");
             }
-            return applyUpdate(slug, updates, extra.signal);
+            if (Date.now() >= preview.expiresAt) return toolResult("Confirmation expired. Prepare a fresh preview.", true);
+            return apply(preview, extra.signal);
         } catch (error) {
-            return updateError(error);
+            return toolError("prepare the job update", error);
         }
     });
 
     server.registerTool("confirm_job_update", {
-        description: `Confirm or cancel the latest pending update_job preview in this MCP session.
-Call this only after showing the exact slug and changes and receiving a subsequent explicit user response.
-Use confirm: true only for approval; use false for rejection. Never call automatically after update_job.
-The confirmation_id is single-use and cannot change the saved slug or fields.
-If the user requests different changes, call update_job again and obtain fresh approval instead.`,
-        inputSchema: z.object({
-            confirmation_id: z.string().uuid().describe("Confirmation ID from the latest update_job preview."),
-            confirm: z.boolean().describe("True only after the user explicitly approves the displayed changes; false to cancel.")
-        }).strict(),
-        annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
-            openWorldHint: true
-        }
+        description: `Confirm or cancel the latest update_job preview only after showing all changes and receiving a subsequent explicit user reply.
+Never call automatically. IDs are single-use, session-bound and expire after 10 minutes. Requested edits require a new preview.`,
+        inputSchema: confirmationSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     }, async ({ confirmation_id, confirm }, extra) => {
-        if (!pendingUpdate || pendingUpdate.confirmation_id !== confirmation_id) {
-            return result("Job not updated. No matching pending confirmation exists in this session. Request a new update_job preview and fresh approval.", true);
+        if (!pending || pending.confirmation_id !== confirmation_id || Date.now() >= pending.expiresAt) {
+            return toolResult("No matching pending confirmation exists. Prepare a new preview and obtain fresh approval.", true);
         }
-
-        const { slug, updates } = pendingUpdate;
-        // Consume before awaiting the API so duplicate confirmations cannot apply twice.
-        pendingUpdate = undefined;
-        if (!confirm) {
-            return result("Job update cancelled. No changes were made.");
-        }
-        return applyUpdate(slug, updates, extra.signal);
+        const preview = pending;
+        pending = undefined;
+        if (!confirm) return toolResult("Job update cancelled. No changes were made.");
+        return apply(preview, extra.signal);
     });
 }

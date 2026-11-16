@@ -1,11 +1,14 @@
 {
   "name": "jobs-mcp-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Shared hackathon jobs board exposed as an authenticated MCP server, backed by PostgreSQL",
   "main": "server.js",
   "scripts": {
-    "test": "node --test",
-    "start": "node server.js"
+    "start": "node --env-file-if-exists=.env server.js",
+    "test": "node --test --test-timeout=60000 test/*.test.js",
+    "db:migrate": "node --env-file-if-exists=.env scripts/migrate.js",
+    "db:seed": "node --env-file-if-exists=.env scripts/import-jobs.js data/demo-jobs.json",
+    "db:import": "node --env-file-if-exists=.env scripts/import-jobs.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +20,14 @@
     "jose": "^6.2.12",
     "jsonwebtoken": "^9.0.3",
     "jwks-rsa": "^4.1.0",
+    "pg": "^8.23.1",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "yaml": "^2.9.1"
+  },
+  "engines": {
+    "node": ">=22.16.0"
   }
 }

@@ -1,40 +1,26 @@
 import jwt from "jsonwebtoken";
 import jwksClient from "jwks-rsa";
 
-const client = jwksClient({
-    jwksUri: "https://dev-duromcyrubs02o5n.us.auth0.com/.well-known/jwks.json"
-});
-
-function getKey(header, callback) {
-    client.getSigningKey(header.kid, (err, key) => {
-        if (err) return callback(err);
-        callback(null, key.getPublicKey());
+export function createAuthenticator(config) {
+    const client = jwksClient({
+        jwksUri: new URL(".well-known/jwks.json", config.AUTH0_ISSUER).href,
+        cache: true, rateLimit: true, jwksRequestsPerMinute: 10, timeout: 10_000
     });
-}
-
-export async function getAuthenticatedUser(req) {
-    const authHeader = req.headers["authorization"];
-    if (!authHeader?.startsWith("Bearer ")) return null;
-
-    const token = authHeader.split(" ")[1];
-
-    return new Promise((resolve, reject) => {
-        jwt.verify(
-            token,
-            getKey,
-            {
-                audience: "https://jobs-mcp-server.onrender.com/mcp",
-                issuer: "https://dev-duromcyrubs02o5n.us.auth0.com/",  // ← trailing slash required
+    function getKey(header, callback) {
+        client.getSigningKey(header.kid, (error, key) => {
+            if (error) return callback(error);
+            callback(null, key.getPublicKey());
+        });
+    }
+    return async req => {
+        const match = /^Bearer ([^ ]+)$/i.exec(req.headers.authorization ?? "");
+        if (!match) return null;
+        return new Promise(resolve => {
+            jwt.verify(match[1], getKey, {
+                audience: config.AUTH0_AUDIENCE,
+                issuer: config.AUTH0_ISSUER,
                 algorithms: ["RS256"]
-            },
-            (err, decoded) => {
-                if (err) {
-                    console.error("Token validation failed:", err.message);
-                    resolve(null);  // ← resolve null, don't reject (avoids 500)
-                } else {
-                    resolve(decoded);
-                }
-            }
-        );
-    });
+            }, (error, decoded) => resolve(error || typeof decoded?.sub !== "string" ? null : decoded));
+        });
+    };
 }
