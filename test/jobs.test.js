@@ -5,7 +5,7 @@ import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createJobsServer } from "../server.js";
+import { app as jobsApp, createJobsServer } from "../server.js";
 import { createMcpHandler } from "../middleware/mcp.js";
 
 const originalFetch = globalThis.fetch;
@@ -15,6 +15,7 @@ let endpoint;
 before(async () => {
     const app = express();
     app.use(express.json());
+    app.use("/anonymous", jobsApp);
     const handler = createMcpHandler(createJobsServer, async req => {
         const subject = req.headers["x-test-user"];
         return subject ? { sub: subject } : null;
@@ -80,6 +81,67 @@ const create = (client, job = newJob) =>
 const confirmCreation = (client, confirmation_id, confirm = true) =>
     client.callTool({ name: "confirm_job_creation", arguments: { confirmation_id, confirm } });
 const createdResponse = () => Response.json({ success: true, job: { id: 42, ...newJob } });
+
+test("connector works without authentication and keeps job confirmations", async t => {
+    const calls = mockJobsApi(t, (_input, init) => {
+        if (init?.method === "POST") return createdResponse();
+        if (init?.method === "PATCH") {
+            return Response.json({ success: true, job: { slug: "developer", title: "Senior Developer" } });
+        }
+        return Response.json({ jobs: [{ slug: "developer", ...newJob }] });
+    });
+    const url = new URL("/anonymous/mcp", endpoint);
+    const client = new Client({ name: "anonymous-test", version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(url);
+    t.after(() => client.close());
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    for (const name of ["search_jobs", "get_job_details", "create_job", "confirm_job_creation", "update_job", "confirm_job_update"]) {
+        assert.ok(tools.some(tool => tool.name === name));
+    }
+
+    const search = await client.callTool({ name: "search_jobs", arguments: {} });
+    assert.equal(JSON.parse(search.content[0].text).jobs[0].slug, "developer");
+    const details = await client.callTool({ name: "get_job_details", arguments: { job_id: "developer" } });
+    assert.equal(JSON.parse(details.content[0].text).slug, "developer");
+    calls.length = 0;
+
+    const creation = JSON.parse((await create(client)).content[0].text);
+    assert.equal(creation.status, "confirmation_required");
+    assert.equal(calls.length, 0);
+    assert.equal((await confirmCreation(client, creation.confirmation_id)).isError, false);
+    assert.equal(calls[0].method, "POST");
+    assert.deepEqual(JSON.parse(calls[0].body), newJob);
+
+    const preview = JSON.parse((await update(client)).content[0].text);
+    assert.equal(preview.status, "confirmation_required");
+    assert.equal(calls.length, 1);
+    assert.equal((await confirmUpdate(client, preview.confirmation_id)).isError, false);
+    assert.equal(calls[1].method, "PATCH");
+    assert.deepEqual(JSON.parse(calls[1].body), { title: "Senior Developer" });
+
+    const controller = new AbortController();
+    try {
+        const stream = await fetch(url, {
+            headers: { Accept: "text/event-stream", "mcp-session-id": transport.sessionId },
+            signal: controller.signal
+        });
+        // The connected client already holds this session's SSE stream.
+        assert.equal(stream.status, 409);
+        assert.equal(stream.headers.has("www-authenticate"), false);
+    } finally {
+        controller.abort();
+    }
+    await transport.terminateSession();
+
+    for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server", "/token"]) {
+        const response = await fetch(new URL(`/anonymous${path}`, endpoint), {
+            method: path === "/token" ? "POST" : "GET"
+        });
+        assert.equal(response.status, 404);
+        assert.equal(response.headers.has("www-authenticate"), false);
+    }
+});
 
 test("creation previews every supplied field and waits for explicit dialog approval", { timeout: 15000 }, async t => {
     const calls = mockJobsApi(t, createdResponse);

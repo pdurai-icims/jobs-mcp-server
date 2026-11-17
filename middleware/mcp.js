@@ -8,8 +8,8 @@ export function createMcpHandler(createServer, authenticate) {
 
     return async (req, res) => {
         try {
-            const user = await authenticate(req);
-            if (!user?.sub) {
+            const user = authenticate ? await authenticate(req) : undefined;
+            if (authenticate && !user?.sub) {
                 res.setHeader(
                     "WWW-Authenticate",
                     'Bearer resource_metadata="https://jobs-mcp-server.onrender.com/.well-known/oauth-protected-resource"'
@@ -23,7 +23,7 @@ export function createMcpHandler(createServer, authenticate) {
 
             const sessionId = req.headers["mcp-session-id"];
             let session = sessions.get(sessionId);
-            if (sessionId && (!session || session.subject !== user.sub)) {
+            if (sessionId && (!session || session.subject !== user?.sub)) {
                 return res.status(404).json({
                     jsonrpc: "2.0",
                     error: { code: -32001, message: "Session not found" },
@@ -45,7 +45,7 @@ export function createMcpHandler(createServer, authenticate) {
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: id => sessions.set(id, session)
                 });
-                session = { transport, subject: user.sub };
+                session = { transport, subject: user?.sub };
                 transport.onclose = () => sessions.delete(transport.sessionId);
                 await server.connect(transport);
             }

@@ -2,12 +2,12 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { getAuthenticatedUser } from "./middleware/auth.js";
+// import { getAuthenticatedUser } from "./middleware/auth.js";
 import { createMcpHandler } from "./middleware/mcp.js";
 import { registerUpdateJob } from "./update-job.js";
 import { registerCreateJob } from "./create-job.js";
 
-const app = express();
+export const app = express();
 app.use(express.json());
 
 // ── Create MCP server ──
@@ -189,7 +189,9 @@ return server;
 }
 
 // Claude.ai connects to this URL
-const mcpHandler = createMcpHandler(createJobsServer, getAuthenticatedUser);
+// Authentication temporarily disabled; restore this call and the OAuth routes below to re-enable.
+// const mcpHandler = createMcpHandler(createJobsServer, getAuthenticatedUser);
+const mcpHandler = createMcpHandler(createJobsServer);
 app.post("/mcp", mcpHandler);
 app.get("/mcp", mcpHandler);
 app.delete("/mcp", mcpHandler);
@@ -199,6 +201,7 @@ app.get("/", (req, res) => {
     res.json({ status: "ok", name: "Jobs MCP Server" });
 });
 
+/* OAuth discovery and token proxy temporarily disabled.
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
     res.json({
         resource: "https://jobs-mcp-server.onrender.com/mcp",
@@ -249,6 +252,8 @@ app.post("/token", express.urlencoded({ extended: true }), async (req, res) => {
         res.status(500).json({ error: "token_proxy_error", message: err.message });
     }
 });
+
+*/
 
 const PORT = process.env.PORT || 3000;
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

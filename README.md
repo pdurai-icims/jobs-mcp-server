@@ -1,6 +1,12 @@
 # Jobs MCP Server
 
-Run `npm start` to serve the authenticated MCP endpoint at `/mcp`.
+Run `npm start` to serve the MCP endpoint at `/mcp`.
+Authentication is temporarily disabled: add the connector with no authentication.
+Anyone who can reach the endpoint can search, view, create, and update jobs;
+creation and update confirmations still apply. OAuth discovery and the token
+proxy are commented out. To restore authentication, uncomment the auth import,
+authenticated handler call, and OAuth routes in `server.js`, and remove the
+unauthenticated handler call.
 Run `npm test` for local tests (the Jobs API is mocked; no live jobs are changed).
 
 ## Creating jobs
@@ -76,6 +82,7 @@ number or `null`. Unknown fields and empty updates are rejected.
 
 The MCP endpoint uses in-memory sessions so confirmation responses can reach the
 pending tool request. Clients must initialize, retain the returned
-`Mcp-Session-Id`, and authenticate every POST, GET, and DELETE request as the same
-user. DELETE ends the session. After a server restart, clients must initialize
+`Mcp-Session-Id` on subsequent POST, GET, and DELETE requests. While authentication
+is disabled, the session ID is the only access boundary; keep it private.
+DELETE ends the session. After a server restart, clients must initialize
 again. Multi-instance deployments require sticky routing for each session.
